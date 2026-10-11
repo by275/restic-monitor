@@ -46,3 +46,7 @@ The shim also recognizes `stats`, including explicit `stats --mode restore-size 
 Run `bash tests/docker-restic-shim.sh` to test the shim with a fake Restic executable. It checks opt-in/off behavior, success/partial/failure exit codes, exact output replay, event creation, `forget --prune` mapping, per-operation Job keys, and reading the Reporter token from a secret file. It does not access a live Repository or send requests. The full project check runs this test automatically.
 
 For a live pilot, keep the original Compose file and image tag available for rollback. Start with one service and a separately authorized test Repository or other safe target. Verify backup output and exit code against the original image before enabling the remaining services.
+
+## Local real-Restic end-to-end check
+
+After building the image, run `corepack pnpm test:local-restic-e2e`. This creates a temporary encrypted filesystem Repository under the project root, backs up two fixture files, runs `restic check`, and verifies the snapshot plus the Reporter start/completion events. Docker runs with `--network none`; no Cloudflare endpoint, external backend, or existing backup source is used. The temporary Repository, password file, and spool are removed on exit. The test requires Docker and the locally built `restic-monitor-docker:pilot` image; `RESTIC_MONITOR_TEST_IMAGE` can select another locally built image.

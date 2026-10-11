@@ -16,6 +16,7 @@
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:reporter": "bash tests/reporter.sh",
     "test:docker-restic-shim": "bash tests/docker-restic-shim.sh",
+    "test:local-restic-e2e": "bash tests/local-restic-e2e.sh",
     "test:dashboard": "node --check apps/web/public/app.js",
     "typecheck": "wrangler types --check --include-runtime false && tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "check": "npm run typecheck && npm test"

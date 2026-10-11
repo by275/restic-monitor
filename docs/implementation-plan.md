@@ -267,9 +267,9 @@ Spool은 `pending/`, `quarantine/`, private `tmp/` 아래에 둔다. 각 이벤�
 
 Compose 예제는 `backup`, `prune`, `check` 서비스용이다. 이미지 기본 실행 사용자와 일치하도록 `RESTIC_RUNTIME_USER`를 지정하고, Reporter token은 Compose secret 파일로 제공한다. Restic Reporter에 필요한 `bash`, `coreutils`, `curl`, `jq`는 overlay 이미지에 설치한다. 기존 6-field cron의 첫 번째 seconds 필드가 `0`일 때만 그 필드를 제거해 Worker의 5-field Job schedule로 옮길 수 있다. seconds 값이 0이 아니면 동일한 분 단위 schedule이 아니므로 파일럿 전에 감시 표현을 따로 정해야 한다. `stats` 호출은 인식하지만 새 통계를 예약하지 않는다.
 
-**검증:** 로컬 fake Restic으로 shim opt-in/off, stdout/stderr/argv/종료 코드 보존, 성공·부분·실패 이벤트, `forget --prune` 분류를 검사한다. Host 파일럿에서는 컨테이너 재시작, 네트워크 차단, D1/API 오류, Restic 실패/부분 실패, spool 회수, 기존 cron 결과 비교를 수행하고 적용 전후 백업의 종료 코드와 산출물이 같은지 확인한다.
+**검증:** fake Restic으로 shim opt-in/off, stdout/stderr/argv/종료 코드 보존, 성공·부분·실패 이벤트, `forget --prune` 분류를 검사한다. 별도 `test:local-restic-e2e`는 프로젝트 루트 아래 임시 암호화 filesystem Repository를 만들고 실제 Restic 0.19.1로 backup과 check를 실행해 snapshot과 Reporter spool 이벤트를 검증한다. 이 테스트는 컨테이너 네트워크를 차단하고 종료 후 Repository/password/spool을 제거한다. Host 파일럿에서는 컨테이너 재시작, 네트워크 차단, D1/API 오류, Restic 실패/부분 실패, spool 회수, 기존 cron 결과 비교를 수행하고 적용 전후 백업의 종료 코드와 산출물이 같은지 확인한다.
 
-**상태:** 저장소 내 통합 adapter와 fake Restic 테스트를 준비했다. Alpine 기반 이미지 빌드와 컨테이너 안에서 Restic 0.19.1 `version` passthrough을 확인했다. 빌드 context는 `.dockerignore` 추가 뒤 약 294 MiB에서 481 KiB로 줄었다. 이 환경에는 Docker Compose plugin이 없어 override merge/interpolation 검증은 못 했고 YAML 문법만 PyYAML로 읽었다. 실제 Host/Repository/Cloudflare 검증과 한 Host 완료 조건은 미수행이며 대상과 안전 범위를 확정한 뒤 진행한다.
+**상태:** 저장소 내 통합 adapter와 fake/real Restic 테스트를 준비했다. Alpine 기반 이미지 빌드, 컨테이너 안의 Restic 0.19.1, 로컬 임시 Repository의 backup/check와 Reporter spool 이벤트를 확인했다. 빌드 context는 `.dockerignore` 추가 뒤 약 294 MiB에서 481 KiB로 줄었다. 이 환경에는 Docker Compose plugin이 없어 override merge/interpolation 검증은 못 했고 YAML 문법만 PyYAML로 읽었다. 실제 API/D1 전송, Host/운영 Repository 적용과 한 Host 완료 조건은 미수행이며 대상과 안전 범위를 확정한 뒤 진행한다.
 
 ### Go Reporter — 별도 후속 단계
 
