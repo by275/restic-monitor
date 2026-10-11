@@ -1,6 +1,6 @@
 # Restic Monitor 구현 계획 및 기술 검토
 
-- 상태: 검토 완료, 1단계 구현 승인됨
+- 상태: 검토 완료, 1~2단계 구현 승인됨
 - 기준일: 2026-10-11
 - 설계 입력: [Restic Monitor 설계 대화](https://chatgpt.com/share/6acafa87-5670-83ee-8073-35f9da97447e)
 - 저장소 상태: 계획 작성 당시 작업 디렉터리에 기존 코드나 백업 환경 파일이 없었다. 실제 Docker/cron 스크립트는 구현 전 통합 단계에서 확인해야 한다.
@@ -122,7 +122,7 @@ v1의 숫자 지표는 JavaScript와 SQLite 경계에서 정확성을 보장하�
 ### 응답과 재시도
 
 - `200`: 저장 완료 또는 같은 payload의 중복 수락. 응답에 `event_id`, `accepted`, `duplicate`, `received_at`을 포함한다.
-- `400/413/422`: 잘못된 JSON, 제한 크기 초과, 계약 위반. 자동 재시도하지 않고 로컬 격리/운영자 확인 대상으로 둔다.
+- `400/413/415/422`: 잘못된 JSON, 제한 크기 초과, 지원하지 않는 Content-Type, 계약 위반. 자동 재시도하지 않고 로컬 격리/운영자 확인 대상으로 둔다.
 - `401/403`: 토큰 또는 권한 문제. 운영자 설정 확인 전까지 재시도 폭주를 막고 이벤트를 보존한다.
 - `409`: event ID 재사용 또는 완료 결과 충돌. 자동 덮어쓰기하지 않고 격리한다.
 - `429`: `Retry-After`를 따르고 재시도한다.
@@ -155,6 +155,17 @@ v1의 숫자 지표는 JavaScript와 SQLite 경계에서 정확성을 보장하�
 
 `runs`에는 단일 `repository_id`를 두지 않는다. 실행 하나가 source와 target 두 저장소를 참조할 수 있기 때문이다. Repository별 실행 이력 인덱스는 `run_repositories(repository_id, run_id)`와 `runs(job_id, started_at DESC)`, `runs(status, started_at)` 조합으로 조회한다. 나머지 필수 인덱스는 `repository_stats(repository_id, measured_at DESC)`, `schedule_occurrences(state, scheduled_for)`, `alerts(status, opened_at DESC)`, `notification_deliveries(status, next_attempt_at)`다. 이벤트 처리의 D1 batch는 개별 이벤트의 원자 경계로 사용한다. D1 batch 실패 시 해당 batch 전체가 롤백될 수 있으므로 여러 클라이언트 이벤트를 한 transaction으로 묶어 일부 이벤트까지 실패시키지 않는다.
 
+### 2단계 수집 경계 확정
+
+- 요청은 `application/json`만 받고 UTF-8 본문은 65,536 bytes까지 허용한다. `Content-Length`와 실제 스트림 길이를 모두 확인한다. JSON Schema draft 2020-12를 검증한 뒤 시각 순서, duration, 허용된 Job/Repository 관계를 추가 검증한다.
+- Reporter 토큰은 `rm1_` + 32 random bytes의 base64url 인코딩이다. D1에는 SHA-256 digest만 넣고 원문은 발급 시 한 번만 보여준다. 토큰은 Host와 `ingest` scope에 묶이며 인증 실패 응답은 세부 사유를 노출하지 않는다.
+- payload hash는 수신한 정확한 UTF-8 본문 bytes의 SHA-256이다. `(token_id, event_id)` 충돌은 기존 hash를 조회해 동일 내용이면 최초 `received_at`으로 중복 승인하고, 다른 내용이면 409를 반환한다. 이벤트 원장, run projection, repository 연결, metrics와 token 사용 시각을 단일 D1 batch로 갱신한다.
+- 완료 이벤트만 도착한 경우 완료 결과의 `started_at`으로 run을 복원한다. 완료 fingerprint와 run identity를 마이그레이션 trigger로 보호하고 Repository 연결에는 run당 역할별 유일성 제약을 둬서, 동시 요청의 서로 다른 완료 결과나 저장소 연결이 batch 전체를 rollback하게 한다.
+- 종료 상태는 Restic 종료 코드와 operation으로 계산한다. 0은 success, backup/forget/forget_prune의 3은 partial_success, 130은 cancelled, 나머지 비영 코드는 failed다. `prune`의 코드 3은 partial success로 가정하지 않는다.
+- 시각은 UTC RFC3339로 받고 시작/종료 역전, duration 불일치(1초 허용), 이벤트 발생 시각과 해당 실행 경계의 불일치(1초 허용), 5분 넘는 미래 시각을 거부한다. 과거 이벤트는 spool 재전송을 위해 허용한다.
+- 오류 요약은 ANSI 제어 코드, URL, 명백한 POSIX/Windows 절대 경로 및 일반적인 secret assignment를 제거한 뒤 1,024자로 제한한다. 이 처리는 전체 로그 전송을 허용하지 않으며, Reporter도 원본 stdout/stderr를 보내지 않는다.
+- 수집 API는 요청별 rate limit과 Cloudflare 계정 사용량 경보를 운영 구성 항목으로 남긴다. Free 한도를 넘으면 D1 요청 자체가 실패할 수 있으므로 본문 크기 제한만으로 가용성을 보장하지 않는다.
+
 MVP Discord는 Webhook URL 하나를 Worker Secret에 저장하고 알림 설정 전체 CRUD는 뒤로 미룬다. 추후 여러 채널을 지원할 때 비밀 저장 방식과 채널 테이블을 별도로 설계한다.
 
 ## 스케줄과 상태 의미
@@ -180,7 +191,7 @@ MVP Discord는 Webhook URL 하나를 Worker Secret에 저장하고 알림 설정
 
 ### 2단계 — 인증 및 이벤트 수집
 
-**작업:** Host 범위 Bearer 토큰 검증, 단일 이벤트 endpoint, payload 크기/필드 검증, event dedupe/hash conflict, 종료 선도착 복구, 실행 상태 projection, exit code 상태 매핑을 구현한다.
+**작업:** Host 범위 Bearer 토큰 검증, 단일 이벤트 endpoint, payload 크기/필드 및 시각 검증, event dedupe/hash conflict, 종료 선도착 복구, 실행 상태 projection, exit code 상태 매핑을 구현한다. 토큰 해시만 저장하는 로컬 발급 절차도 제공한다.
 
 **검증:** 정상/부분/실패 종료, 잘못된 토큰, 범위 밖 Job/Repository, 동일 이벤트 재전송, 동일 ID 상이 본문 409, 완료 후 늦은 시작, 동일 run 상충 완료, 원자 rollback 테스트.
 
