@@ -1,6 +1,6 @@
 # Restic Monitor 구현 계획 및 기술 검토
 
-- 상태: 1~7단계 구현 완료 및 로컬 검증됨. 다음은 8단계 Docker/cron 통합 파일럿이며 별도 승인이 필요하다.
+- 상태: 1~7단계 구현 완료 및 로컬 검증됨. 8단계용 opt-in Docker shim, Compose 예제와 가짜 Restic 기반 검증을 저장소 안에 준비했다. 실제 Host 적용과 Repository 실행은 대상 설정과 안전한 검증 범위가 필요하다.
 - 기준일: 2026-10-11
 - 설계 입력: [Restic Monitor 설계 대화](https://chatgpt.com/share/6acafa87-5670-83ee-8073-35f9da97447e)
 - 저장소 상태: 계획 작성 당시 작업 디렉터리에 기존 코드나 백업 환경 파일이 없었다. 실제 Docker/cron 스크립트는 구현 전 통합 단계에서 확인해야 한다.
@@ -261,11 +261,15 @@ Spool은 `pending/`, `quarantine/`, private `tmp/` 아래에 둔다. 각 이벤�
 
 ### 8단계 — Docker/cron 통합 검증과 한 Host 파일럿
 
-**작업:** 실제 백업 구성을 확인해 최소 Wrapper 변경을 제안하고, 별도 테스트 Repository 또는 허용된 안전 대상에서 end-to-end를 검증한 뒤 한 Host에 opt-in 적용한다. 기존 cron은 결과와 전송이 검증되기 전까지 유지한다.
+**준비 완료:** 저장소 안에 기존 Docker 이미지에 덧붙이는 opt-in Restic command shim, Compose override 예제와 fake Restic 테스트를 추가했다. 기존 컨테이너 cron 문자열과 명령행은 이 예제에서 바꾸지 않는다. shim은 기본 비활성이고, `forget --prune`도 프로토콜의 `forget_prune`으로 분류한다. 이 검증은 실제 Host 구성이나 Repository를 읽거나 바꾸지 않는다.
 
-**검증:** 컨테이너 재시작, 네트워크 차단, D1/API 오류, Restic 실패/부분 실패, spool 회수, 기존 cron 결과와 비교. 적용 전후 백업 자체의 종료 코드와 산출물이 같은지 확인한다.
+**남은 작업:** 실제 백업 구성을 소유자가 제공한 범위에서 확인하고 최소 wrapper 변경을 제안한다. 별도 테스트 Repository 또는 허용된 안전 대상에서 end-to-end를 검증한 뒤 한 Host에 opt-in 적용한다. 실제 Host와 Repository 실행은 대상 및 안전한 검증 범위가 정해진 승인이 있어야 하며, 기존 cron은 결과와 전송이 검증되기 전까지 유지한다.
 
-**완료:** 한 Host의 실제 cron에서 누락 없이 수집되고 장애 시 로컬 큐가 동작한다. 운영 적용은 대상/시간 창/롤백 절차가 명확한 별도 승인 후 수행한다.
+Compose 예제는 `backup`, `prune`, `check` 서비스용이다. 이미지 기본 실행 사용자와 일치하도록 `RESTIC_RUNTIME_USER`를 지정하고, Reporter token은 Compose secret 파일로 제공한다. Restic Reporter에 필요한 `bash`, `coreutils`, `curl`, `jq`는 overlay 이미지에 설치한다. 기존 6-field cron의 첫 번째 seconds 필드가 `0`일 때만 그 필드를 제거해 Worker의 5-field Job schedule로 옮길 수 있다. seconds 값이 0이 아니면 동일한 분 단위 schedule이 아니므로 파일럿 전에 감시 표현을 따로 정해야 한다. `stats` 호출은 인식하지만 새 통계를 예약하지 않는다.
+
+**검증:** 로컬 fake Restic으로 shim opt-in/off, stdout/stderr/argv/종료 코드 보존, 성공·부분·실패 이벤트, `forget --prune` 분류를 검사한다. Host 파일럿에서는 컨테이너 재시작, 네트워크 차단, D1/API 오류, Restic 실패/부분 실패, spool 회수, 기존 cron 결과 비교를 수행하고 적용 전후 백업의 종료 코드와 산출물이 같은지 확인한다.
+
+**상태:** 저장소 내 통합 adapter와 fake Restic 테스트를 준비했다. Alpine 기반 이미지 빌드와 컨테이너 안에서 Restic 0.19.1 `version` passthrough을 확인했다. 빌드 context는 `.dockerignore` 추가 뒤 약 294 MiB에서 481 KiB로 줄었다. 이 환경에는 Docker Compose plugin이 없어 override merge/interpolation 검증은 못 했고 YAML 문법만 PyYAML로 읽었다. 실제 Host/Repository/Cloudflare 검증과 한 Host 완료 조건은 미수행이며 대상과 안전 범위를 확정한 뒤 진행한다.
 
 ### Go Reporter — 별도 후속 단계
 

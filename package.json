@@ -11,10 +11,11 @@
     "db:migrate:local": "wrangler d1 migrations apply restic-monitor --local",
     "token:mint": "node scripts/mint-token.mjs",
     "types:generate": "wrangler types --include-runtime false",
-    "test": "vitest run --config vitest.protocol.config.ts && vitest run --config vitest.worker.config.ts && bash tests/reporter.sh && node --check apps/web/public/app.js",
+    "test": "vitest run --config vitest.protocol.config.ts && vitest run --config vitest.worker.config.ts && bash tests/reporter.sh && bash tests/docker-restic-shim.sh && node --check apps/web/public/app.js",
     "test:protocol": "vitest run --config vitest.protocol.config.ts",
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:reporter": "bash tests/reporter.sh",
+    "test:docker-restic-shim": "bash tests/docker-restic-shim.sh",
     "test:dashboard": "node --check apps/web/public/app.js",
     "typecheck": "wrangler types --check --include-runtime false && tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "check": "npm run typecheck && npm test"

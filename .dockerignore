@@ -1,0 +1,10 @@
+.git
+node_modules
+**/node_modules
+.wrangler
+coverage
+dist
+.env
+.env.*
+**/.env
+**/.env.*
