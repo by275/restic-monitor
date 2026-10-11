@@ -1,6 +1,6 @@
 # Restic Monitor 구현 계획 및 기술 검토
 
-- 상태: 검토 완료, 1~2단계 구현 승인됨
+- 상태: 검토 완료, 1~3단계 구현 승인됨
 - 기준일: 2026-10-11
 - 설계 입력: [Restic Monitor 설계 대화](https://chatgpt.com/share/6acafa87-5670-83ee-8073-35f9da97447e)
 - 저장소 상태: 계획 작성 당시 작업 디렉터리에 기존 코드나 백업 환경 파일이 없었다. 실제 Docker/cron 스크립트는 구현 전 통합 단계에서 확인해야 한다.
@@ -200,6 +200,12 @@ MVP Discord는 Webhook URL 하나를 Worker Secret에 저장하고 알림 설정
 ### 3단계 — Bash Reporter와 spool/retry
 
 **작업:** `run`, `report`, `flush` CLI 또는 동등한 최소 Bash 인터페이스, Restic 프로세스 상태 보존, 명령별 JSON 파서, 원자 spool, 인증 헤더, 타임아웃/backoff/jitter/격리 정책을 구현한다.
+
+**인터페이스:** `bin/restic-monitor run`은 명시한 Job/Repository/operation과 `--` 뒤의 Restic 인자를 그대로 사용한다. 실행 시작 이벤트를 먼저 큐에 넣고 전송을 비동기로 시도한 뒤 Restic을 실행한다. 종료 후 completion을 큐에 넣고 한 번 더 보낸다. 출력은 임시 파일에 분리 캡처한 뒤 종료 시 원래 stdout/stderr로 재생하므로 내용과 종료 코드는 보존되지만, 실행 중 진행 출력은 실시간으로 보이지 않는다. `report EVENT.json`은 이미 만들어진 계약 이벤트를 큐에 넣고, `flush`는 재시도를 수행한다.
+
+Spool은 `pending/`, `quarantine/`, private `tmp/` 아래에 둔다. 각 이벤트 JSON은 atomic link/rename 방식으로 게시하고, 재시도 횟수와 다음 시각은 별도 state 파일에 둔다. 동일 ID·동일 바이트는 한 번만 큐에 있고 다른 바이트는 격리한다. 30일 초과 항목, 손상 파일, 영구 HTTP 오류, 큐 용량 제한으로 거부된 이벤트는 격리해 원문을 보존하며 자동 전송하지 않으므로 운영자가 원인을 해결한 뒤 수동 복구한다. 네트워크 오류, 408/429/5xx와 401/403은 같은 이벤트를 backoff 후 재시도하며, 인증을 복구하면 큐가 다시 전달된다. Spool 설정·권한 오류가 백업 명령을 막지는 않지만 이벤트 전달을 잃을 수 있으므로 `reporter.log`와 quarantine을 감시한다. Restic의 출력과 종료 상태는 Reporter 동작 실패에 영향받지 않는다.
+
+`backup --json`에서 마지막 summary만 추출한다. 안전 정수 범위 밖의 uint64는 생략한다. `forget --json`과 `stats --json`은 구조만 검사하며 현재 프로토콜에 해당 지표가 없어 값을 보내지 않는다. `prune`은 JSON이 아니고 `forget --prune`은 혼합 출력이어서 파싱하지 않는다. 설치 Restic에 의존하지 않는 fixture는 공식 0.19.1 문서 형식으로 만든 계약 fixture이며, 실제 환경에서 캡처한 출력은 8단계 파일럿 때 별도 확인한다.
 
 **검증:** 설치 Restic에 의존하지 않는 가짜 실행 파일과 버전별 fixture를 사용해 backup/forget/prune/forget-prune/stats를 검사한다. exit 0/3/1/10/11/12/130, summary 없음, 잘못된 JSON, SIGTERM, API network/429/5xx/4xx, spool 손상/중복 flush를 검증한다.
 

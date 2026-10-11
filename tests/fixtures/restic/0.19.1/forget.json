@@ -1,0 +1,3 @@
+[
+  {"host":"sample-host","keep":[],"remove":[],"paths":["/private/path"]}
+]

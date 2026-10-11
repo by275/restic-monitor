@@ -1,0 +1,790 @@
+#!/usr/bin/env bash
+
+set -u
+
+VERSION="0.1.0"
+MAX_EVENT_BYTES=65536
+SELF_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
+SPOOL_DIR=""
+PENDING_DIR=""
+QUARANTINE_DIR=""
+TEMP_DIR=""
+FLUSH_LOCK_DIR=""
+QUIET_LOG=0
+RUN_CHILD_PID=""
+RUN_SIGNAL=""
+RUN_CHILD_STATUS=""
+
+log() {
+  local message
+  message="$(date -u +%Y-%m-%dT%H:%M:%SZ) restic-monitor: $*"
+  if [[ -n $SPOOL_DIR && -d $SPOOL_DIR && -w $SPOOL_DIR ]]; then
+    printf '%s\n' "$message" >> "$SPOOL_DIR/reporter.log"
+    chmod 600 -- "$SPOOL_DIR/reporter.log" 2>/dev/null || true
+  elif (( QUIET_LOG == 0 )); then
+    printf '%s\n' "$message" >&2
+  fi
+}
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  restic-monitor run --job KEY --repository KEY --operation OP [--source-repository KEY] [--restic-bin PATH] -- RESTIC_ARGS...
+  restic-monitor report EVENT.json
+  restic-monitor flush [--once]
+
+Configuration is read from RESTIC_MONITOR_API_URL, RESTIC_MONITOR_TOKEN,
+RESTIC_MONITOR_SPOOL_DIR, and optional RESTIC_MONITOR_* settings.
+USAGE
+}
+
+is_uint() {
+  [[ ${1:-} =~ ^[0-9]+$ ]]
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+configured_spool_dir() {
+  if [[ -n ${RESTIC_MONITOR_SPOOL_DIR:-} ]]; then
+    printf '%s' "$RESTIC_MONITOR_SPOOL_DIR"
+    return
+  fi
+  local state_root
+  if [[ -n ${XDG_STATE_HOME:-} ]]; then
+    state_root=$XDG_STATE_HOME
+  elif [[ -n ${HOME:-} ]]; then
+    state_root="$HOME/.local/state"
+  else
+    state_root=''
+  fi
+  if [[ -z $state_root ]]; then
+    return 1
+  fi
+  printf '%s/restic-monitor/spool' "${state_root%/}"
+}
+
+init_spool() {
+  local configured
+  configured=$(configured_spool_dir) || {
+    log 'set RESTIC_MONITOR_SPOOL_DIR or HOME to choose a persistent spool directory'
+    return 1
+  }
+  if [[ -z $configured || -L $configured ]]; then
+    log 'spool path is empty or a symbolic link'
+    return 1
+  fi
+
+  SPOOL_DIR=$configured
+  PENDING_DIR="$SPOOL_DIR/pending"
+  QUARANTINE_DIR="$SPOOL_DIR/quarantine"
+  if ! mkdir -p -- "$PENDING_DIR" "$QUARANTINE_DIR" "$SPOOL_DIR/tmp"; then
+    log 'cannot create spool directories'
+    return 1
+  fi
+  if [[ -L $PENDING_DIR || -L $QUARANTINE_DIR || -L $SPOOL_DIR/tmp ]]; then
+    log 'spool subdirectories must not be symbolic links'
+    return 1
+  fi
+  chmod 700 -- "$SPOOL_DIR" "$PENDING_DIR" "$QUARANTINE_DIR" "$SPOOL_DIR/tmp" || {
+    log 'cannot secure spool directory permissions'
+    return 1
+  }
+}
+
+new_id() {
+  local value
+  value=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  [[ $value =~ ^[a-f0-9]{32}$ ]] || return 1
+  printf '%s' "$value"
+}
+
+event_file_valid() {
+  local file=$1
+  local size
+  [[ -f $file && ! -L $file ]] || return 1
+  size=$(wc -c < "$file" | tr -d '[:space:]') || return 1
+  is_uint "$size" && (( size <= MAX_EVENT_BYTES )) || return 1
+  require_command jq || return 1
+  jq -e '
+    type == "object" and
+    .schema_version == 1 and
+    (.event_id | type == "string" and test("^[A-Za-z0-9_-]{1,64}$")) and
+    (.run_id | type == "string" and test("^[A-Za-z0-9_-]{1,64}$")) and
+    (.event_type == "run.started" or .event_type == "run.completed") and
+    (.event_type != "run.completed" or (.result | type == "object"))
+  ' "$file" >/dev/null 2>&1
+}
+
+event_id_from_file() {
+  jq -er '.event_id | select(type == "string" and test("^[A-Za-z0-9_-]{1,64}$"))' "$1" 2>/dev/null
+}
+
+queue_usage() {
+  local file count=0 bytes=0 size
+  shopt -s nullglob
+  for file in "$PENDING_DIR"/*.json; do
+    [[ -f $file && ! -L $file ]] || continue
+    count=$((count + 1))
+    size=$(wc -c < "$file" | tr -d '[:space:]') || size=0
+    is_uint "$size" || size=0
+    bytes=$((bytes + size))
+  done
+  shopt -u nullglob
+  printf '%s %s\n' "$count" "$bytes"
+}
+
+quarantine_file() {
+  local file=$1 reason=$2 base stamp destination state_file
+  [[ -e $file ]] || return 0
+  base=$(basename -- "$file")
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  destination="$QUARANTINE_DIR/${base}.${stamp}.$$.$RANDOM.bad"
+  mv -- "$file" "$destination" || return 1
+  state_file="${file%.json}.state"
+  if [[ -e $state_file ]]; then
+    mv -- "$state_file" "$destination.state" 2>/dev/null || rm -f -- "$state_file"
+  fi
+  printf '%s\n' "$reason" > "$destination.reason"
+  chmod 600 -- "$destination" "$destination.reason" 2>/dev/null || true
+  log "quarantined $base ($reason)"
+}
+
+enqueue_event_file() {
+  local source_file=$1 event_id target temp count bytes size max_events max_bytes
+  event_file_valid "$source_file" || {
+    log 'event file is invalid or larger than 65,536 bytes'
+    return 1
+  }
+  event_id=$(event_id_from_file "$source_file") || return 1
+  target="$PENDING_DIR/$event_id.json"
+  size=$(wc -c < "$source_file" | tr -d '[:space:]') || return 1
+
+  if [[ -e $target ]]; then
+    if cmp -s -- "$source_file" "$target"; then
+      log "event $event_id is already queued"
+      return 0
+    fi
+    temp=$(mktemp "$SPOOL_DIR/tmp/conflict.XXXXXX") || return 1
+    cp -- "$source_file" "$temp" || { rm -f -- "$temp"; return 1; }
+    chmod 600 -- "$temp"
+    quarantine_file "$temp" "event_id_conflict:$event_id"
+    return 1
+  fi
+
+  read -r count bytes < <(queue_usage)
+  max_events=${RESTIC_MONITOR_SPOOL_MAX_EVENTS:-4096}
+  max_bytes=${RESTIC_MONITOR_SPOOL_MAX_BYTES:-268435456}
+  if ! is_uint "$max_events" || ! is_uint "$max_bytes"; then
+    log 'spool limits must be non-negative integers'
+    return 1
+  fi
+  if (( count >= max_events || bytes + size > max_bytes )); then
+    temp=$(mktemp "$SPOOL_DIR/tmp/overflow.XXXXXX") || return 1
+    if ! cat -- "$source_file" > "$temp"; then
+      rm -f -- "$temp"
+      return 1
+    fi
+    chmod 600 -- "$temp"
+    quarantine_file "$temp" 'spool_capacity_reached'
+    log 'spool capacity reached; event was preserved in quarantine for manual recovery'
+    return 1
+  fi
+
+  temp=$(mktemp "$PENDING_DIR/.enqueue.XXXXXX") || return 1
+  if ! cat -- "$source_file" > "$temp"; then
+    rm -f -- "$temp"
+    return 1
+  fi
+  chmod 600 -- "$temp"
+  if ln -- "$temp" "$target" 2>/dev/null; then
+    rm -f -- "$temp"
+    log "queued $event_id"
+    return 0
+  fi
+  rm -f -- "$temp"
+  if [[ -e $target ]] && cmp -s -- "$source_file" "$target"; then
+    log "event $event_id is already queued"
+    return 0
+  fi
+  log "could not queue event $event_id"
+  return 1
+}
+
+write_retry_state() {
+  local event_file=$1 failures=$2 next_at=$3 state_file temp
+  state_file="${event_file%.json}.state"
+  temp=$(mktemp "$PENDING_DIR/.state.XXXXXX") || return 1
+  printf '%s %s\n' "$failures" "$next_at" > "$temp" || { rm -f -- "$temp"; return 1; }
+  chmod 600 -- "$temp"
+  mv -f -- "$temp" "$state_file"
+}
+
+read_retry_state() {
+  local event_file=$1 state_file line failures next_at
+  state_file="${event_file%.json}.state"
+  if [[ ! -e $state_file ]]; then
+    printf '0 0\n'
+    return
+  fi
+  line=$(cat -- "$state_file" 2>/dev/null) || line=''
+  read -r failures next_at <<< "$line"
+  if ! is_uint "${failures:-}" || ! is_uint "${next_at:-}"; then
+    mv -- "$state_file" "$QUARANTINE_DIR/$(basename -- "$state_file").corrupt.$$.$RANDOM" 2>/dev/null || rm -f -- "$state_file"
+    log "reset corrupt retry state for $(basename -- "$event_file")"
+    printf '0 0\n'
+    return
+  fi
+  printf '%s %s\n' "$failures" "$next_at"
+}
+
+acquire_flush_lock() {
+  local owner_pid
+  FLUSH_LOCK_DIR="$SPOOL_DIR/.flush-lock"
+  if mkdir -- "$FLUSH_LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$FLUSH_LOCK_DIR/pid"
+    chmod 600 -- "$FLUSH_LOCK_DIR/pid"
+    trap release_flush_lock EXIT
+    return 0
+  fi
+
+  owner_pid=$(cat -- "$FLUSH_LOCK_DIR/pid" 2>/dev/null || true)
+  if is_uint "$owner_pid" && kill -0 "$owner_pid" 2>/dev/null; then
+    log 'another flush is already running'
+    return 1
+  fi
+  if [[ -z $owner_pid ]]; then
+    log 'flush lock has no owner; remove the stale .flush-lock directory after checking no flush is active'
+    return 1
+  fi
+  rm -rf -- "$FLUSH_LOCK_DIR" 2>/dev/null || return 1
+  if mkdir -- "$FLUSH_LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$FLUSH_LOCK_DIR/pid"
+    chmod 600 -- "$FLUSH_LOCK_DIR/pid"
+    trap release_flush_lock EXIT
+    return 0
+  fi
+  log 'another flush acquired the lock'
+  return 1
+}
+
+release_flush_lock() {
+  local owner_pid
+  [[ -n $FLUSH_LOCK_DIR && -d $FLUSH_LOCK_DIR ]] || return 0
+  owner_pid=$(cat -- "$FLUSH_LOCK_DIR/pid" 2>/dev/null || true)
+  if [[ $owner_pid == "$$" ]]; then
+    rm -rf -- "$FLUSH_LOCK_DIR"
+  fi
+}
+
+normalize_api_url() {
+  local value=${RESTIC_MONITOR_API_URL:-}
+  [[ $value =~ ^https?://[^[:space:]]+$ ]] || return 1
+  [[ $value != *\?* && $value != *\#* && $value != *'@'* ]] || return 1
+  value=${value%/}
+  printf '%s/api/v1/ingest/events' "$value"
+}
+
+retry_after_seconds() {
+  local headers_file=$1 value now target
+  value=$(awk 'tolower($1) == "retry-after:" { sub(/\r$/, ""); value=$2 } END { print value }' "$headers_file" 2>/dev/null)
+  [[ -n $value ]] || return 1
+  if is_uint "$value"; then
+    printf '%s' "$value"
+    return 0
+  fi
+  target=$(date -u -d "$value" +%s 2>/dev/null) || return 1
+  now=$(date -u +%s)
+  if (( target > now )); then printf '%s' "$((target - now))"; else printf '0'; fi
+}
+
+backoff_seconds() {
+  local failures=$1 base max_delay exponent delay jitter
+  base=${RESTIC_MONITOR_RETRY_BASE_SECONDS:-2}
+  max_delay=${RESTIC_MONITOR_RETRY_MAX_SECONDS:-300}
+  if ! is_uint "$base" || ! is_uint "$max_delay"; then
+    base=2
+    max_delay=300
+  fi
+  exponent=$((failures - 1))
+  (( exponent > 8 )) && exponent=8
+  delay=$((base * (2 ** exponent)))
+  (( delay > max_delay )) && delay=$max_delay
+  jitter=0
+  if (( base > 0 )); then jitter=$((RANDOM % (base + 1))); fi
+  delay=$((delay + jitter))
+  (( delay > max_delay )) && delay=$max_delay
+  printf '%s' "$delay"
+}
+
+send_event() {
+  local event_file=$1 response_file=$2 headers_file=$3 curl_config=$4 http_code curl_status response_event_id accepted
+  local api_endpoint token curl_bin timeout connect_timeout
+  api_endpoint=$(normalize_api_url) || {
+    log 'RESTIC_MONITOR_API_URL must be an http(s) base URL without userinfo, query, or fragment'
+    return 3
+  }
+  token=${RESTIC_MONITOR_TOKEN:-}
+  [[ $token =~ ^rm1_[A-Za-z0-9_-]{43}$ ]] || {
+    log 'RESTIC_MONITOR_TOKEN is missing or has an invalid format'
+    return 3
+  }
+  curl_bin=${RESTIC_MONITOR_CURL_BIN:-curl}
+  require_command "$curl_bin" || {
+    log 'curl is required to send queued events'
+    return 3
+  }
+  timeout=${RESTIC_MONITOR_HTTP_TIMEOUT_SECONDS:-5}
+  connect_timeout=${RESTIC_MONITOR_CONNECT_TIMEOUT_SECONDS:-2}
+  is_uint "$timeout" && (( timeout > 0 )) || timeout=5
+  is_uint "$connect_timeout" && (( connect_timeout > 0 && connect_timeout <= timeout )) || connect_timeout=2
+  printf 'header = "Authorization: Bearer %s"\n' "$token" > "$curl_config" || return 2
+  chmod 600 -- "$curl_config"
+
+  http_code=$("$curl_bin" \
+    --silent --show-error \
+    --config "$curl_config" \
+    --connect-timeout "$connect_timeout" \
+    --max-time "$timeout" \
+    --proto '=http,https' \
+    --request POST \
+    --header 'Content-Type: application/json' \
+    --data-binary "@$event_file" \
+    --dump-header "$headers_file" \
+    --output "$response_file" \
+    --write-out '%{http_code}' \
+    "$api_endpoint" 2>/dev/null)
+  curl_status=$?
+  if (( curl_status != 0 )); then
+    return 1
+  fi
+  if [[ ! $http_code =~ ^[0-9]{3}$ ]]; then
+    return 1
+  fi
+  if [[ $http_code == 200 ]] && jq -e . "$response_file" >/dev/null 2>&1; then
+    response_event_id=$(jq -r '.event_id // empty' "$response_file" 2>/dev/null)
+    accepted=$(jq -r '.accepted == true' "$response_file" 2>/dev/null)
+    local queued_event_id
+    queued_event_id=$(event_id_from_file "$event_file") || return 1
+    if [[ $response_event_id == "$queued_event_id" && $accepted == true ]]; then
+      return 0
+    fi
+    return 1
+  fi
+  if [[ $http_code == 429 || $http_code == 408 ]] || (( 10#$http_code >= 500 )); then
+    return 1
+  fi
+  if [[ $http_code == 401 || $http_code == 403 ]]; then
+    log "API authentication rejected $event_file; event remains pending while credentials are checked"
+    return 1
+  fi
+  return 2
+}
+
+flush_one_event() {
+  local event_file=$1 max_attempts=$2 now mtime max_age failures next_at
+  local response_file headers_file curl_config result http_code retry_after delay attempts=0
+  local base_name expected_id actual_id retry_state
+
+  base_name=$(basename -- "$event_file")
+  expected_id=${base_name%.json}
+  actual_id=$(event_id_from_file "$event_file" 2>/dev/null || true)
+  if ! event_file_valid "$event_file" || [[ $actual_id != "$expected_id" ]]; then
+    quarantine_file "$event_file" 'invalid_event_file'
+    return 1
+  fi
+
+  max_age=${RESTIC_MONITOR_SPOOL_MAX_AGE_SECONDS:-2592000}
+  if is_uint "$max_age"; then
+    now=$(date -u +%s)
+    mtime=$(stat -c %Y "$event_file" 2>/dev/null || printf '%s' "$now")
+    if is_uint "$mtime" && (( now - mtime > max_age )); then
+      quarantine_file "$event_file" 'event_exceeded_max_spool_age'
+      return 1
+    fi
+  fi
+
+  retry_state=$(read_retry_state "$event_file")
+  read -r failures next_at <<< "$retry_state"
+  now=$(date -u +%s)
+  if (( next_at > now )); then
+    return 0
+  fi
+
+  while (( attempts < max_attempts )); do
+    response_file=$(mktemp "$SPOOL_DIR/tmp/response.XXXXXX") || return 1
+    headers_file=$(mktemp "$SPOOL_DIR/tmp/headers.XXXXXX") || { rm -f -- "$response_file"; return 1; }
+    curl_config=$(mktemp "$SPOOL_DIR/tmp/curl.XXXXXX") || {
+      rm -f -- "$response_file" "$headers_file"
+      return 1
+    }
+    chmod 600 -- "$response_file" "$headers_file" "$curl_config"
+    : > "$headers_file"
+    : > "$response_file"
+
+    send_event "$event_file" "$response_file" "$headers_file" "$curl_config"
+    result=$?
+    retry_after=$(retry_after_seconds "$headers_file" 2>/dev/null || true)
+    rm -f -- "$response_file" "$headers_file" "$curl_config"
+    attempts=$((attempts + 1))
+
+    if (( result == 0 )); then
+      rm -f -- "$event_file" "${event_file%.json}.state"
+      log "accepted $expected_id"
+      return 0
+    fi
+    if (( result == 2 )); then
+      quarantine_file "$event_file" 'permanent_http_error'
+      return 1
+    fi
+    if (( result == 3 )); then
+      return 1
+    fi
+
+    failures=$((failures + 1))
+    delay=$(backoff_seconds "$failures")
+    if is_uint "${retry_after:-}" && (( retry_after > delay )); then delay=$retry_after; fi
+    local max_delay=${RESTIC_MONITOR_RETRY_MAX_SECONDS:-300}
+    is_uint "$max_delay" || max_delay=300
+    (( delay > max_delay )) && delay=$max_delay
+    now=$(date -u +%s)
+    next_at=$((now + delay))
+    write_retry_state "$event_file" "$failures" "$next_at" || {
+      log "could not persist retry state for $expected_id"
+      return 1
+    }
+    log "delivery failed for $expected_id; retry scheduled in ${delay}s"
+    if (( attempts < max_attempts && delay > 0 )); then sleep "$delay"; fi
+    if (( delay > 0 )); then
+      now=$(date -u +%s)
+      if (( next_at > now )); then return 1; fi
+    fi
+  done
+  return 1
+}
+
+flush_command() {
+  local once=0 max_attempts file pending_failures=0
+  while (($#)); do
+    case $1 in
+      --once) once=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      *) usage; return 2 ;;
+    esac
+  done
+  init_spool || return 1
+  require_command jq || { log 'jq is required to flush events'; return 1; }
+  [[ -n ${RESTIC_MONITOR_API_URL:-} && -n ${RESTIC_MONITOR_TOKEN:-} ]] || {
+    log 'RESTIC_MONITOR_API_URL and RESTIC_MONITOR_TOKEN are required to flush events'
+    return 1
+  }
+  if ! acquire_flush_lock; then return 0; fi
+
+  max_attempts=${RESTIC_MONITOR_MAX_ATTEMPTS_PER_FLUSH:-5}
+  is_uint "$max_attempts" && (( max_attempts > 0 && max_attempts <= 10 )) || max_attempts=5
+  (( once == 1 )) && max_attempts=1
+
+  local files=()
+  shopt -s nullglob
+  files=("$PENDING_DIR"/*.json)
+  shopt -u nullglob
+  if ((${#files[@]} > 0)); then
+    while IFS= read -r file; do
+      if ! flush_one_event "$file" "$max_attempts"; then
+        pending_failures=$((pending_failures + 1))
+      fi
+    done < <(printf '%s\n' "${files[@]}" | LC_ALL=C sort)
+  fi
+  (( pending_failures == 0 ))
+}
+
+report_command() {
+  local event_file=${1:-}
+  [[ $# -eq 1 && -n $event_file ]] || { usage; return 2; }
+  require_command jq || { log 'jq is required to queue event files'; return 1; }
+  init_spool || return 1
+  enqueue_event_file "$event_file" || return 1
+  if [[ -n ${RESTIC_MONITOR_API_URL:-} && -n ${RESTIC_MONITOR_TOKEN:-} ]]; then
+    "$SELF_PATH" flush --once || log 'event remains queued for a later flush'
+  else
+    log 'event remains queued; configure the API URL and token to send it'
+  fi
+  return 0
+}
+
+build_started_event() {
+  local output_file=$1 event_id=$2 run_id=$3 workflow_id=$4 occurred_at=$5
+  local job_key=$6 repository_key=$7 operation=$8 source_repository_key=$9
+  local client_name=${RESTIC_MONITOR_CLIENT_NAME:-restic-monitor-bash}
+  local client_version=${RESTIC_MONITOR_CLIENT_VERSION:-$VERSION}
+  [[ -n $client_name && ${#client_name} -le 64 ]] || client_name=restic-monitor-bash
+  [[ -n $client_version && ${#client_version} -le 64 ]] || client_version=$VERSION
+  jq -c -n \
+    --arg event_id "$event_id" \
+    --arg run_id "$run_id" \
+    --arg workflow_id "$workflow_id" \
+    --arg occurred_at "$occurred_at" \
+    --arg job_key "$job_key" \
+    --arg repository_key "$repository_key" \
+    --arg operation "$operation" \
+    --arg source_repository_key "$source_repository_key" \
+    --arg client_name "$client_name" \
+    --arg client_version "$client_version" \
+    '{schema_version:1,event_id:$event_id,run_id:$run_id,event_type:"run.started",occurred_at:$occurred_at,job_key:$job_key,repository_key:$repository_key,operation:$operation,client:{name:$client_name,version:$client_version}} +
+     (if $workflow_id == "" then {} else {workflow_id:$workflow_id} end) +
+     (if $source_repository_key == "" then {} else {source_repository_key:$source_repository_key} end)' \
+    > "$output_file"
+}
+
+collect_backup_metrics() {
+  local stdout_file=$1
+  jq -s -c '
+    def counter:
+      if type == "number" and . >= 0 and . <= 9007199254740991 and floor == . then . else null end;
+    def snapshot:
+      if type == "string" and test("^[A-Fa-f0-9]{8,64}$") then . else null end;
+    ([.[] | select(type == "object" and .message_type == "summary")] | last // {}) as $summary |
+    {
+      bytes_processed: ($summary.total_bytes_processed | counter),
+      bytes_added: ($summary.data_added | counter),
+      bytes_added_packed: ($summary.data_added_packed | counter),
+      files_new: ($summary.files_new | counter),
+      files_changed: ($summary.files_changed | counter),
+      files_unmodified: ($summary.files_unmodified | counter),
+      snapshot_id: ($summary.snapshot_id | snapshot)
+    } | with_entries(select(.value != null))
+  ' "$stdout_file" 2>/dev/null
+}
+
+sanitize_error_json() {
+  local stderr_file=$1
+  tail -c 8192 -- "$stderr_file" 2>/dev/null | tr -d '\000' | jq -Rs '
+    gsub("\\u001b(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])"; "") |
+    gsub("(?i)(password|passwd|token|secret|api[_-]?key|access[_-]?key|authorization)\\s*[:=]\\s*[^\\s,;]+"; "[REDACTED]") |
+    gsub("(?i)\\b(https?|s3|gs|azure|b2|rest|sftp)://[^\\s]+"; "[URL]") |
+    gsub("\\b[A-Za-z]:\\\\([^\\s\\\\]+\\\\)*[^\\s]+"; "[PATH]") |
+    gsub("(^|[\\s=(])/([^\\s/]+/)*[^\\s,;)]+"; "[PATH]") |
+    gsub("[\\r\\n\\t]+"; " ") |
+    .[0:1024]
+  ' 2>/dev/null
+}
+
+build_completed_event() {
+  local output_file=$1 event_id=$2 run_id=$3 workflow_id=$4 occurred_at=$5
+  local job_key=$6 repository_key=$7 operation=$8 source_repository_key=$9
+  local exit_code=${10} started_at=${11} finished_at=${12} duration_ms=${13}
+  local metrics_json=${14} error_json=${15}
+  local client_name=${RESTIC_MONITOR_CLIENT_NAME:-restic-monitor-bash}
+  local client_version=${RESTIC_MONITOR_CLIENT_VERSION:-$VERSION}
+  [[ -n $client_name && ${#client_name} -le 64 ]] || client_name=restic-monitor-bash
+  [[ -n $client_version && ${#client_version} -le 64 ]] || client_version=$VERSION
+  jq -c -n \
+    --arg event_id "$event_id" \
+    --arg run_id "$run_id" \
+    --arg workflow_id "$workflow_id" \
+    --arg occurred_at "$occurred_at" \
+    --arg job_key "$job_key" \
+    --arg repository_key "$repository_key" \
+    --arg operation "$operation" \
+    --arg source_repository_key "$source_repository_key" \
+    --arg client_name "$client_name" \
+    --arg client_version "$client_version" \
+    --argjson exit_code "$exit_code" \
+    --arg started_at "$started_at" \
+    --arg finished_at "$finished_at" \
+    --argjson duration_ms "$duration_ms" \
+    --argjson metrics "$metrics_json" \
+    --argjson error_summary "$error_json" \
+    '{schema_version:1,event_id:$event_id,run_id:$run_id,event_type:"run.completed",occurred_at:$occurred_at,job_key:$job_key,repository_key:$repository_key,operation:$operation,client:{name:$client_name,version:$client_version},result:({exit_code:$exit_code,started_at:$started_at,finished_at:$finished_at,duration_ms:$duration_ms} +
+      (if $error_summary == null or $error_summary == "" then {} else {error_summary:$error_summary} end) +
+      (if ($metrics | length) == 0 then {} else {metrics:$metrics} end))} +
+     (if $workflow_id == "" then {} else {workflow_id:$workflow_id} end) +
+     (if $source_repository_key == "" then {} else {source_repository_key:$source_repository_key} end)' \
+    > "$output_file"
+}
+
+run_command() {
+  QUIET_LOG=1
+  local job_key=${RESTIC_MONITOR_JOB_KEY:-} repository_key=${RESTIC_MONITOR_REPOSITORY_KEY:-}
+  local operation=${RESTIC_MONITOR_OPERATION:-} source_repository_key=${RESTIC_MONITOR_SOURCE_REPOSITORY_KEY:-}
+  local restic_bin=${RESTIC_MONITOR_RESTIC_BIN:-restic} option
+  local -a restic_args=()
+  while (($#)); do
+    case $1 in
+      --job) [[ $# -ge 2 ]] || { usage; return 2; }; job_key=$2; shift 2 ;;
+      --repository) [[ $# -ge 2 ]] || { usage; return 2; }; repository_key=$2; shift 2 ;;
+      --operation) [[ $# -ge 2 ]] || { usage; return 2; }; operation=$2; shift 2 ;;
+      --source-repository) [[ $# -ge 2 ]] || { usage; return 2; }; source_repository_key=$2; shift 2 ;;
+      --restic-bin) [[ $# -ge 2 ]] || { usage; return 2; }; restic_bin=$2; shift 2 ;;
+      --) shift; restic_args=("$@"); break ;;
+      -h|--help) usage; return 0 ;;
+      *) log "unknown run option: $1"; usage; return 2 ;;
+    esac
+  done
+  if ((${#restic_args[@]} == 0)); then
+    log 'pass the unchanged Restic command and arguments after --'
+    usage
+    return 2
+  fi
+
+  if ! require_command jq; then
+    log 'jq is unavailable; running Restic without event reporting'
+    "$restic_bin" "${restic_args[@]}"
+    return $?
+  fi
+  TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/restic-monitor-run.XXXXXX") || {
+    log 'cannot create a temporary directory; running Restic without event reporting'
+    "$restic_bin" "${restic_args[@]}"
+    return $?
+  }
+  chmod 700 -- "$TEMP_DIR"
+  local stdout_file="$TEMP_DIR/stdout" stderr_file="$TEMP_DIR/stderr"
+  : > "$stdout_file"
+  : > "$stderr_file"
+
+  local reporting_ready=1
+  if [[ ! $job_key =~ ^[A-Za-z0-9._-]{1,128}$ || ! $repository_key =~ ^[A-Za-z0-9._-]{1,128}$ ||
+        ! $operation =~ ^(backup|forget|prune|forget_prune|copy|stats|check|restore)$ ]]; then
+    reporting_ready=0
+    log 'Job, Repository, or operation is missing/invalid; Restic will run without event reporting'
+  elif [[ $operation == copy && ! $source_repository_key =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+    reporting_ready=0
+    log 'copy operation requires --source-repository; Restic will run without event reporting'
+  elif [[ $operation != copy ]]; then
+    source_repository_key=''
+  fi
+  if ! init_spool; then
+    reporting_ready=0
+    log 'spool is unavailable; Restic will run without event reporting'
+  fi
+
+  local run_id='' workflow_id='' start_event_id='' complete_event_id='' start_epoch start_time
+  local start_event_file="$TEMP_DIR/started.json" complete_event_file="$TEMP_DIR/completed.json"
+  local start_flush_pid=""
+  start_epoch=$(date -u +%s)
+  start_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if (( reporting_ready == 1 )); then
+    run_id=$(new_id) || reporting_ready=0
+    start_event_id=$(new_id) || reporting_ready=0
+    complete_event_id=$(new_id) || reporting_ready=0
+    workflow_id=${RESTIC_MONITOR_WORKFLOW_ID:-$run_id}
+    if [[ ! $workflow_id =~ ^[A-Za-z0-9_-]{1,64}$ ]]; then
+      log 'invalid workflow id; using the generated run id'
+      workflow_id=$run_id
+    fi
+    if (( reporting_ready == 1 )); then
+      if build_started_event "$start_event_file" "$start_event_id" "$run_id" "$workflow_id" "$start_time" \
+           "$job_key" "$repository_key" "$operation" "$source_repository_key" &&
+         enqueue_event_file "$start_event_file"; then
+        if [[ -n ${RESTIC_MONITOR_API_URL:-} && -n ${RESTIC_MONITOR_TOKEN:-} ]]; then
+          "$SELF_PATH" flush --once >/dev/null 2>&1 &
+          start_flush_pid=$!
+        fi
+      else
+        log 'could not queue the started event; completion reporting will still be attempted'
+      fi
+    fi
+  fi
+
+  RUN_SIGNAL=""
+  RUN_CHILD_STATUS=""
+  trap 'handle_run_signal INT' INT
+  trap 'handle_run_signal TERM' TERM
+  "$restic_bin" "${restic_args[@]}" > "$stdout_file" 2> "$stderr_file" &
+  RUN_CHILD_PID=$!
+  if [[ -n $RUN_SIGNAL ]]; then
+    kill -s "$RUN_SIGNAL" "$RUN_CHILD_PID" 2>/dev/null || true
+  fi
+  wait "$RUN_CHILD_PID"
+  local restic_exit_code=$?
+  if [[ -n $RUN_CHILD_STATUS ]]; then restic_exit_code=$RUN_CHILD_STATUS; fi
+  RUN_CHILD_PID=""
+  trap - INT TERM
+
+  if [[ -n $start_flush_pid ]]; then
+    wait "$start_flush_pid" 2>/dev/null || true
+  fi
+  local finish_epoch finish_time duration_ms metrics_json='{}' error_json='null' has_json=0
+  finish_epoch=$(date -u +%s)
+  finish_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  duration_ms=$(((finish_epoch - start_epoch) * 1000))
+  (( duration_ms < 0 )) && duration_ms=0
+
+  for option in "${restic_args[@]}"; do
+    if [[ $option == --json || $option == --json=true ]]; then has_json=1; fi
+  done
+  if (( has_json == 1 )); then
+    case $operation in
+      backup)
+        metrics_json=$(collect_backup_metrics "$stdout_file" 2>/dev/null) || metrics_json='{}'
+        [[ -n $metrics_json ]] || metrics_json='{}'
+        ;;
+      forget)
+        if [[ -s $stdout_file ]] && ! jq -e 'type == "array"' "$stdout_file" >/dev/null 2>&1; then
+          log 'forget JSON output was malformed; event will include no metrics'
+        fi
+        ;;
+      stats)
+        if [[ -s $stdout_file ]] && ! jq -e 'type == "object"' "$stdout_file" >/dev/null 2>&1; then
+          log 'stats JSON output was malformed; event will include no metrics'
+        fi
+        ;;
+      prune|forget_prune)
+        log "$operation output is not parsed because Restic emits plain or mixed output"
+        ;;
+    esac
+  fi
+  if (( restic_exit_code != 0 )) && [[ -s $stderr_file ]]; then
+    error_json=$(sanitize_error_json "$stderr_file" 2>/dev/null) || error_json='null'
+    [[ -n $error_json ]] || error_json='null'
+  fi
+
+  if (( reporting_ready == 1 )); then
+    if build_completed_event "$complete_event_file" "$complete_event_id" "$run_id" "$workflow_id" "$finish_time" \
+      "$job_key" "$repository_key" "$operation" "$source_repository_key" "$restic_exit_code" \
+      "$start_time" "$finish_time" "$duration_ms" "$metrics_json" "$error_json" &&
+      enqueue_event_file "$complete_event_file"; then
+      if [[ -n ${RESTIC_MONITOR_API_URL:-} && -n ${RESTIC_MONITOR_TOKEN:-} ]]; then
+        "$SELF_PATH" flush --once >/dev/null 2>&1 || log 'one or more events remain queued for a later flush'
+      else
+        log 'events remain queued; configure the API URL and token to send them'
+      fi
+    else
+      log 'could not queue the completed event'
+    fi
+  fi
+
+  cat -- "$stdout_file"
+  cat -- "$stderr_file" >&2
+  rm -rf -- "$TEMP_DIR"
+  TEMP_DIR=""
+  return "$restic_exit_code"
+}
+
+handle_run_signal() {
+  local signal=$1
+  trap '' INT TERM
+  RUN_SIGNAL=$signal
+  if [[ -n $RUN_CHILD_PID ]]; then
+    kill -s "$signal" "$RUN_CHILD_PID" 2>/dev/null || true
+    wait "$RUN_CHILD_PID"
+    RUN_CHILD_STATUS=$?
+  fi
+}
+
+main() {
+  local command=${1:-}
+  if (($# == 0)); then usage; return 2; fi
+  shift
+  case $command in
+    run) run_command "$@" ;;
+    report) report_command "$@" ;;
+    flush) flush_command "$@" ;;
+    -h|--help) usage; return 0 ;;
+    --version) printf '%s\n' "$VERSION" ;;
+    *) usage; return 2 ;;
+  esac
+}
+
+main "$@"

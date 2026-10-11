@@ -1,0 +1,2 @@
+repository contains 2 packs
+successfully removed 1 old pack
