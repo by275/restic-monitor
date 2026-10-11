@@ -1,6 +1,6 @@
 # Restic Monitor
 
-Restic Monitor records backup job events while leaving the existing Docker, cron, and Restic execution model in place. The current implementation accepts authenticated run events, projects them into D1, and provides an opt-in Bash Reporter with a persistent retry spool. It does not modify an existing backup host or cron entry.
+Restic Monitor records backup job events while leaving the existing Docker, cron, and Restic execution model in place. The current implementation accepts authenticated run events, projects them into D1, detects missed schedules and timed out runs, and sends alerts through a persistent Discord outbox. It also provides an opt-in Bash Reporter with a persistent retry spool. It does not modify an existing backup host or cron entry.
 
 ## Requirements
 
@@ -21,6 +21,8 @@ Open `http://localhost:8787/healthz`; the expected response is `{"ok":true,"serv
 The event endpoint is `POST /api/v1/ingest/events`; it requires an `application/json` event v1 body and a Host-scoped Bearer token. It accepts at most 65,536 body bytes and stores only the payload hash in the idempotency ledger.
 
 Read-only dashboard APIs are under `/api/v1/read/` and only answer on the hostname configured in `ADMIN_HOST`. Protect that dashboard hostname with Cloudflare Access and use a separate public ingest hostname for Reporter traffic. See the [read API contract](docs/read-api.md) and [Cloudflare Access setup](docs/cloudflare-access.md) before deployment; host matching is a routing guard and does not replace Access login.
+
+Discord delivery is optional until configured. For a deployed Worker, add `DISCORD_WEBHOOK_URL` as a Cloudflare Secret with `corepack pnpm exec wrangler secret put DISCORD_WEBHOOK_URL`. For local development, put the same key in the gitignored `.dev.vars` file next to `wrangler.jsonc`. If the secret is absent, notifications stay pending in D1 and resume when it is configured. Never put the webhook URL in `wrangler.jsonc`, source files, or logs.
 
 To provision a local reporter token, first create its Host, Job, Repository, and Job/Repository associations in D1. Run `corepack pnpm token:mint <host-id>` and keep the printed token securely; insert the generated SQL row, which contains only the token hash. The token itself is shown once and cannot be recovered from D1.
 

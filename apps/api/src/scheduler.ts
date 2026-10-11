@@ -1,4 +1,5 @@
 import { Cron } from "croner";
+import { queueOpenNotifications, queueRecoveryNotification } from "./notifications";
 
 const MAX_JOBS_PER_TICK = 20;
 const MAX_OCCURRENCES_PER_JOB_TICK = 20;
@@ -175,6 +176,11 @@ async function reconcileJob(db: D1Database, job: ScheduleJob, now: number): Prom
              WHERE rule_key = 'missed_schedule' AND status = 'open'
                AND occurrence_job_id = ? AND occurrence_scheduled_for = ?`,
           ).bind(now, job.id, match.scheduledFor),
+          queueRecoveryNotification(
+            db,
+            `missed_schedule:${job.id}:${match.scheduledFor}`,
+            now,
+          ),
         );
       }
     }
@@ -222,6 +228,7 @@ async function reconcileJob(db: D1Database, job: ScheduleJob, now: number): Prom
          AND r.started_at + (j.timeout_seconds * 1000) <= ?
        ON CONFLICT(dedupe_key) DO NOTHING`,
     ).bind(now, now, job.id, now),
+    queueOpenNotifications(db, job.id, now),
     db.prepare(
       `UPDATE runs
        SET status = 'timed_out',

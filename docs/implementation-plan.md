@@ -1,6 +1,6 @@
 # Restic Monitor 구현 계획 및 기술 검토
 
-- 상태: 1~5단계 구현 완료 및 검증됨. 다음은 6단계 Discord outbox이며 별도 승인이 필요하다.
+- 상태: 1~6단계 구현 완료 및 로컬 검증됨. 다음은 7단계 Repository stats이며 별도 승인이 필요하다.
 - 기준일: 2026-10-11
 - 설계 입력: [Restic Monitor 설계 대화](https://chatgpt.com/share/6acafa87-5670-83ee-8073-35f9da97447e)
 - 저장소 상태: 계획 작성 당시 작업 디렉터리에 기존 코드나 백업 환경 파일이 없었다. 실제 Docker/cron 스크립트는 구현 전 통합 단계에서 확인해야 한다.
@@ -235,11 +235,15 @@ Spool은 `pending/`, `quarantine/`, private `tmp/` 아래에 둔다. 각 이벤�
 
 ### 6단계 — 영속 알림 outbox와 Discord
 
-**작업:** alert별 Discord delivery, 제한된 retry, `Retry-After`, 성공/실패 추적, 복구 알림과 억제를 구현한다. webhook은 Cloudflare Secret에서만 읽는다.
+**작업:** alert별 Discord delivery, 제한된 retry, `Retry-After`, 성공/실패 추적, 복구 알림과 중복 억제를 구현했다. Webhook URL은 Cloudflare Secret binding `DISCORD_WEBHOOK_URL`에서만 읽으며 `wrangler.jsonc`에는 넣지 않는다. Worker는 D1 outbox에서 한 Cron invocation당 최대 10개 항목을 조건부 claim하고, claim lease가 만료된 항목은 다음 invocation에서 회수한다. 각 delivery는 `open`/`recovery` 유형별로 유일하고 `pending`/`sending`/`sent`/`dead`, 시도 횟수, 재시도 시각, 마지막 오류와 claim 시각을 보존한다. alert 생성 및 복구 delivery 추가는 alert 상태 변경과 같은 D1 batch에 들어간다. 기존 open alert는 migration에서 outbox에 보충하며 이미 resolve된 과거 alert에 대한 소급 복구 메시지는 만들지 않는다.
 
-**검증:** mock Discord의 성공/429/5xx/timeout, Worker 재시작 사이 재시도 지속, delivery 중복 방지, recovery 알림 단 1회, webhook 미설정.
+429는 Discord `Retry-After` header 또는 JSON `retry_after` 값을 따르고, 408/5xx/네트워크 오류는 지수 backoff와 jitter를 적용한다. 일반 backoff는 60초부터 최대 6시간까지 증가하며 시도는 최대 8회다. 429는 제공된 retry 시간을 사용한다. 408/429/5xx 외 4xx는 `dead` 처리해 잘못된 요청을 자동 반복하지 않는다. webhook이 없거나 URL 형식/도메인이 올바르지 않으면 delivery를 건드리지 않아 secret 설정 뒤에 처리할 수 있다. Discord 요청에는 `wait=true`를 붙이고 `allowed_mentions.parse=[]`로 사용자 입력이 mention을 발생시키지 않게 한다. 오류 응답 본문과 fetch 예외를 저장하지 않아 webhook token이 기록에 섞이지 않도록 한다.
 
-**완료:** alert 생성과 외부 전송 성공을 구분해 관찰할 수 있고 일시 장애 후 outbox가 다시 전달한다.
+이 outbox는 동시 Cron invocation의 중복 claim을 막고, 2xx 확인 뒤 sent 상태를 기록한다. Discord Webhook 실행 API에 요청 멱등성 키가 없어 Discord가 메시지를 만든 직후 Worker가 죽고 D1의 sent 갱신을 못 한 경우에는 lease 회수 후 재전송되어 중복될 수 있다. 따라서 외부 채널 전달은 at-least-once이며 exactly-once를 보장하지 않는다. 운영자가 설정하는 mute/snooze 정책은 이번 단계 범위가 아니고, alert dedupe 및 `(alert, channel, notification_type)` 유일성으로 반복 생성/전송만 억제한다.
+
+**검증:** mock Discord의 성공/429 header·body/5xx/timeout/permanent 4xx, 재호출 사이 D1 재시도 지속, 8회 retry 제한, 겹친 Cron의 동시 claim, 한 delivery 실패 뒤 다른 delivery 처리, recovery outbox 단 1회와 ingest timeout resolve, webhook 미설정.
+
+**완료:** alert 행과 외부 delivery 결과가 D1에서 구분되며 일시 장애 뒤 outbox를 재개한다. 실제 Cloudflare 계정 배포와 live Discord 전송은 수행하지 않았다.
 
 ### 7단계 — Repository stats와 이상 증가 탐지
 
@@ -284,6 +288,8 @@ MVP는 단계 1~6과 한 Host 파일럿까지다. 백업 실행 수집, 부분 �
 - Restic [stats mode 의미](https://restic.readthedocs.io/en/stable/manual_rest.html)
 - Cloudflare [Workers Vitest integration](https://developers.cloudflare.com/workers/testing/vitest-integration/), [first test guide](https://developers.cloudflare.com/workers/testing/vitest-integration/write-your-first-test/), [test APIs](https://developers.cloudflare.com/workers/testing/vitest-integration/test-apis/)
 - Cloudflare [D1 Worker API](https://developers.cloudflare.com/d1/worker-api/d1-database/), [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/), [Wrangler D1 commands](https://developers.cloudflare.com/d1/wrangler-commands/)
+- Cloudflare [Workers secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
+- Discord [webhook execution](https://discord.com/developers/docs/resources/webhook), [rate limits](https://discord.com/developers/docs/topics/rate-limits)
 - Cloudflare [Worker TypeScript types](https://developers.cloudflare.com/workers/languages/typescript/#generate-types)
 - Cloudflare [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)
 - Cloudflare [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)

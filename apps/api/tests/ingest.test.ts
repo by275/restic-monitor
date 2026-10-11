@@ -303,6 +303,15 @@ describe("event ingestion", () => {
         .first(),
     ).toEqual({ status: "open" });
     expect(await count("alerts", "run_id", start.run_id)).toBe(1);
+    expect(
+      await env.DB.prepare(
+        `SELECT notification_type, status FROM notification_deliveries
+         WHERE alert_id = (SELECT id FROM alerts WHERE run_id = ? AND rule_key = 'run_timeout')
+         ORDER BY notification_type`,
+      )
+        .bind(start.run_id)
+        .all(),
+    ).toMatchObject({ results: [{ notification_type: "open", status: "pending" }] });
 
     const completion = completedEvent(fixture, {
       runId: start.run_id,
@@ -323,6 +332,20 @@ describe("event ingestion", () => {
       .first<{ status: string; resolved_at: number | null }>();
     expect(resolvedAlert?.status).toBe("resolved");
     expect(resolvedAlert?.resolved_at).toBeGreaterThan(timeoutAt);
+    expect(
+      await env.DB.prepare(
+        `SELECT notification_type, status FROM notification_deliveries
+         WHERE alert_id = (SELECT id FROM alerts WHERE run_id = ? AND rule_key = 'run_timeout')
+         ORDER BY notification_type`,
+      )
+        .bind(start.run_id)
+        .all(),
+    ).toMatchObject({
+      results: [
+        { notification_type: "open", status: "pending" },
+        { notification_type: "recovery", status: "pending" },
+      ],
+    });
   });
 
   it("accepts the same event only once and rejects event ID reuse with different bytes", async () => {

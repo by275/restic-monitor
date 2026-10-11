@@ -2,6 +2,7 @@ import { Validator, type Schema } from "@cfworker/json-schema";
 import { Hono, type Context } from "hono";
 import eventSchema from "../../../packages/protocol/schemas/event-v1.schema.json";
 import readApi from "./read";
+import { queueRecoveryNotification, runNotificationTick } from "./notifications";
 import { runScheduleTick } from "./scheduler";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -338,6 +339,11 @@ app.post("/api/v1/ingest/events", async (context) => {
         `UPDATE alerts SET status = 'resolved', resolved_at = ?
          WHERE rule_key = 'run_timeout' AND status = 'open' AND run_id = ?`,
       ).bind(receivedAt, event.run_id),
+      queueRecoveryNotification(
+        context.env.DB,
+        `run_timeout:${event.run_id}`,
+        receivedAt,
+      ),
     );
   }
 
@@ -372,8 +378,13 @@ app.notFound((context) => context.json({ error: "not_found" }, 404));
 
 export default {
   fetch: (request: Request, env: Env, context: ExecutionContext) => app.fetch(request, env, context),
-  scheduled: async (_controller: ScheduledController, env: Env, _context: ExecutionContext) => {
+  scheduled: async (
+    _controller: ScheduledController,
+    env: Env & { DISCORD_WEBHOOK_URL?: string },
+    _context: ExecutionContext,
+  ) => {
     await runScheduleTick(env.DB, Date.now());
+    await runNotificationTick(env.DB, env.DISCORD_WEBHOOK_URL, Date.now());
   },
 };
 
