@@ -3,6 +3,12 @@
   "name": "restic-monitor",
   "main": "apps/api/src/index.ts",
   "compatibility_date": "2026-10-11",
+  "assets": {
+    "directory": "./apps/web/public"
+  },
+  "vars": {
+    "ADMIN_HOST": "localhost"
+  },
   "d1_databases": [
     {
       "binding": "DB",

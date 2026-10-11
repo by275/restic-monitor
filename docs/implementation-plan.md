@@ -1,6 +1,6 @@
 # Restic Monitor 구현 계획 및 기술 검토
 
-- 상태: 검토 완료, 1~3단계 구현 승인됨
+- 상태: 검토 완료, 1~4단계 구현 승인됨
 - 기준일: 2026-10-11
 - 설계 입력: [Restic Monitor 설계 대화](https://chatgpt.com/share/6acafa87-5670-83ee-8073-35f9da97447e)
 - 저장소 상태: 계획 작성 당시 작업 디렉터리에 기존 코드나 백업 환경 파일이 없었다. 실제 Docker/cron 스크립트는 구현 전 통합 단계에서 확인해야 한다.
@@ -213,11 +213,11 @@ Spool은 `pending/`, `quarantine/`, private `tmp/` 아래에 둔다. 각 이벤�
 
 ### 4단계 — 읽기 API와 최소 대시보드
 
-**작업:** cursor pagination과 필터를 지원하는 runs/hosts/repositories/overview 조회, 실행 상세와 백업 증가량 및 Repository 측정 차트, Cloudflare Access 정책을 붙인다. 모든 관리자 설정 CRUD와 UI 프레임워크 부가 기능은 범위를 제한한다.
+**작업:** cursor pagination과 필터를 지원하는 `/overview`, `/runs`, `/runs/:runId`, `/hosts`, `/repositories`, `/repositories/:key/stats` 읽기 API, 실행 상세와 백업 증가량 및 Repository 측정 차트, Cloudflare Access 배포 안내를 구현한다. 목록 cursor는 정렬 키와 고유 ID를 사용하고 현재 필터 signature에 묶는다. Worker 조회는 prepared statement와 bind 값만 사용하며 pagination 정렬에 맞춘 D1 인덱스를 추가한다. 읽기 API는 `ADMIN_HOST`의 정확한 hostname만 허용해 `workers.dev` 또는 공개 ingest hostname을 통한 우회를 막는다. 실제 사용자 인증은 Cloudflare Access edge policy로 적용한다. 운영에서는 dashboard와 ingest를 별도 hostname으로 분리하고, dashboard hostname 전체에 Allow policy를 적용한다. ingest hostname은 Bearer 토큰으로만 수집 endpoint를 보호한다. `workers.dev`를 계속 켜 둘 경우에도 읽기 API host guard가 유지되어야 한다. UI는 Workers Static Assets로 제공하고 추가 프레임워크나 chart dependency를 두지 않는다. 관리 설정 CRUD와 UI 프레임워크 부가 기능은 범위를 제한한다.
 
-**검증:** 조회 API 권한, 필터/커서 경계, 빈 데이터/오류 화면, 접근 보호 및 UI build 테스트.
+**검증:** 조회 API의 host guard, 필터/커서 경계, 빈 데이터/오류 화면, run detail와 repository stats, Wrangler static asset smoke test를 검증한다. 로컬 테스트는 Cloudflare Access 로그인 흐름 자체를 대신하지 않으며, 실제 Access policy는 배포 hostname에 대해 Cloudflare 대시보드에서 별도로 구성한다.
 
-**완료:** Host/Job/Repository별 최근 상태와 실행 상세를 확인하고 오래된 이력에 대해 제한된 페이지 조회를 할 수 있다.
+**완료:** Host/Job/Repository별 최근 상태와 실행 상세를 확인하고 오래된 이력에 대해 제한된 페이지 조회를 할 수 있다. Dashboard hostname은 Access로 보호되며 public ingest hostname에서는 읽기 API가 거부된다.
 
 ### 5단계 — missed schedule / timeout 엔진
 
@@ -288,3 +288,5 @@ MVP는 단계 1~6과 한 Host 파일럿까지다. 백업 실행 수집, 부분 �
 - Cloudflare D1 [Worker Binding API 및 batch](https://developers.cloudflare.com/d1/worker-api/d1-database/)
 - Cloudflare D1 [prepared statements](https://developers.cloudflare.com/d1/worker-api/prepared-statements/)
 - Cloudflare Access [Application token validation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/)
+- Cloudflare Access [applications and application types](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/choose-application-type/), [application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)
+- Cloudflare Workers [static asset routing](https://developers.cloudflare.com/workers/static-assets/routing/worker-script/) and [static asset headers](https://developers.cloudflare.com/workers/static-assets/headers/)

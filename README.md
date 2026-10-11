@@ -20,6 +20,8 @@ Open `http://localhost:8787/healthz`; the expected response is `{"ok":true,"serv
 
 The event endpoint is `POST /api/v1/ingest/events`; it requires an `application/json` event v1 body and a Host-scoped Bearer token. It accepts at most 65,536 body bytes and stores only the payload hash in the idempotency ledger.
 
+Read-only dashboard APIs are under `/api/v1/read/` and only answer on the hostname configured in `ADMIN_HOST`. Protect that dashboard hostname with Cloudflare Access and use a separate public ingest hostname for Reporter traffic. See the [read API contract](docs/read-api.md) and [Cloudflare Access setup](docs/cloudflare-access.md) before deployment; host matching is a routing guard and does not replace Access login.
+
 To provision a local reporter token, first create its Host, Job, Repository, and Job/Repository associations in D1. Run `corepack pnpm token:mint <host-id>` and keep the printed token securely; insert the generated SQL row, which contains only the token hash. The token itself is shown once and cannot be recovered from D1.
 
 ## Bash Reporter
@@ -42,7 +44,7 @@ corepack pnpm test
 corepack pnpm typecheck
 ```
 
-`test:protocol` validates the versioned event examples and rejection cases with JSON Schema. `test:worker` runs the Worker in the Cloudflare Workers Vitest runtime and applies the D1 migrations to an isolated local database. `test:reporter` uses fake Restic and HTTP executables, so tests do not require a live repository or network.
+`test:protocol` validates the versioned event examples and rejection cases with JSON Schema. `test:worker` runs the Worker in the Cloudflare Workers Vitest runtime and applies the D1 migrations to an isolated local database. `test:reporter` uses fake Restic and HTTP executables, so tests do not require a live repository or network. The dashboard is a dependency-free static app served by Workers Static Assets.
 
 Wrangler binding types are generated in `worker-configuration.d.ts`, with runtime API types supplied by the pinned official `@cloudflare/workers-types` package. Run `corepack pnpm types:generate` after changing `wrangler.jsonc`; `corepack pnpm check` verifies that the generated binding file is current.
 

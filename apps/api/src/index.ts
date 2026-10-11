@@ -1,6 +1,7 @@
 import { Validator, type Schema } from "@cfworker/json-schema";
 import { Hono, type Context } from "hono";
 import eventSchema from "../../../packages/protocol/schemas/event-v1.schema.json";
+import readApi from "./read";
 
 const app = new Hono<{ Bindings: Env }>();
 const eventValidator = new Validator(eventSchema as unknown as Schema, "2020-12");
@@ -108,6 +109,8 @@ app.get("/healthz", (context) =>
     service: "restic-monitor",
   }),
 );
+
+app.route("/api/v1/read", readApi);
 
 app.post("/api/v1/ingest/events", async (context) => {
   const now = Date.now();

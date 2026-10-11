@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101827" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Restic Monitor</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Restic Monitor 홈">
+          <span class="brand-mark" aria-hidden="true">R</span>
+          <span>restic<span class="brand-light"> monitor</span></span>
+        </a>
+        <div class="topbar-meta">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span id="updated-at">연결 중</span>
+          <button id="refresh-button" class="button button-quiet" type="button">새로고침</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="page-heading">
+          <div>
+            <p class="eyebrow">백업 상태 한눈에 보기</p>
+            <h1>운영 현황</h1>
+            <p class="subheading">최근 실행, 호스트 상태, 저장소 측정값을 확인합니다.</p>
+          </div>
+          <div class="filter-row" aria-label="실행 필터">
+            <label>
+              <span>호스트</span>
+              <select id="host-filter"><option value="">전체 호스트</option></select>
+            </label>
+            <label>
+              <span>저장소</span>
+              <select id="repository-filter"><option value="">전체 저장소</option></select>
+            </label>
+            <label>
+              <span>상태</span>
+              <select id="status-filter">
+                <option value="">모든 상태</option>
+                <option value="running">실행 중</option>
+                <option value="success">성공</option>
+                <option value="partial_success">부분 성공</option>
+                <option value="failed">실패</option>
+                <option value="timed_out">시간 초과</option>
+                <option value="cancelled">취소</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <div id="page-error" class="notice notice-error" role="alert" hidden></div>
+
+        <section class="metric-grid" aria-label="최근 7일 요약">
+          <article class="metric-card metric-total">
+            <span class="metric-label">최근 7일 실행</span>
+            <strong id="count-total">—</strong>
+            <span class="metric-foot">모든 작업</span>
+          </article>
+          <article class="metric-card metric-success">
+            <span class="metric-label">성공</span>
+            <strong id="count-success">—</strong>
+            <span class="metric-foot">정상 완료</span>
+          </article>
+          <article class="metric-card metric-partial">
+            <span class="metric-label">부분 성공</span>
+            <strong id="count-partial">—</strong>
+            <span class="metric-foot">일부 항목 확인 필요</span>
+          </article>
+          <article class="metric-card metric-failed">
+            <span class="metric-label">실패 및 시간 초과</span>
+            <strong id="count-failed">—</strong>
+            <span class="metric-foot">실패 · 시간 초과 · 취소</span>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">활성 호스트</span>
+            <strong id="count-hosts">—</strong>
+            <span class="metric-foot">등록된 백업 호스트</span>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">활성 저장소</span>
+            <strong id="count-repositories">—</strong>
+            <span class="metric-foot">연결된 Restic 저장소</span>
+          </article>
+        </section>
+
+        <div class="content-grid">
+          <section class="panel runs-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">실행 이력</p>
+                <h2>최근 실행</h2>
+              </div>
+              <span id="runs-count" class="panel-meta"></span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">시작 시각</th>
+                    <th scope="col">작업 / 호스트</th>
+                    <th scope="col">저장소</th>
+                    <th scope="col">상태</th>
+                    <th scope="col">추가 용량</th>
+                    <th scope="col"><span class="visually-hidden">상세</span></th>
+                  </tr>
+                </thead>
+                <tbody id="runs-body">
+                  <tr><td colspan="6" class="empty-cell">실행 이력을 불러오는 중입니다.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="panel-footer">
+              <button id="load-more" class="button button-outline" type="button" hidden>이전 실행 더 보기</button>
+            </div>
+          </section>
+
+          <section class="panel hosts-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">실행 주체</p>
+                <h2>호스트</h2>
+              </div>
+              <span id="hosts-count" class="panel-meta"></span>
+            </div>
+            <div id="hosts-list" class="stack-list">
+              <p class="empty-state">호스트를 불러오는 중입니다.</p>
+            </div>
+          </section>
+
+          <section class="panel repositories-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">저장소 목록</p>
+                <h2>저장소 측정값</h2>
+              </div>
+              <label class="compact-select">
+                <span class="visually-hidden">측정 종류</span>
+                <select id="measurement-filter">
+                  <option value="restic_restore_size">복원 크기</option>
+                  <option value="restic_raw_data">Restic 원시 데이터</option>
+                  <option value="restic_total_size">Restic 전체 크기</option>
+                  <option value="backend_physical_bytes">백엔드 실제 사용량</option>
+                </select>
+              </label>
+            </div>
+            <div class="repo-layout">
+              <div id="repositories-list" class="repository-list">
+                <p class="empty-state">저장소를 불러오는 중입니다.</p>
+              </div>
+              <div class="chart-panel">
+                <div class="chart-heading">
+                  <div>
+                    <strong id="chart-repository">저장소를 선택하세요</strong>
+                    <span id="chart-measurement">복원 크기</span>
+                  </div>
+                  <span id="chart-latest" class="chart-latest">—</span>
+                </div>
+                <div id="stats-chart" class="chart" role="img" aria-label="저장소 측정값 추이">
+                  <p class="empty-state">측정 데이터가 없습니다.</p>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <footer class="footer-note">Restic Monitor · 데이터는 등록된 실행 이벤트와 측정값을 기준으로 표시됩니다.</footer>
+    </div>
+
+    <dialog id="run-dialog" class="run-dialog" aria-labelledby="dialog-title">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">실행 상세</p>
+          <h2 id="dialog-title">실행 정보</h2>
+        </div>
+        <button id="close-dialog" class="button button-quiet" type="button" aria-label="닫기">닫기</button>
+      </div>
+      <div id="run-detail" class="detail-content"></div>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

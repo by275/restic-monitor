@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Restic Monitor API
   version: 1.0.0
-  description: Versioned event ingestion contract. Runtime endpoint implementation starts in phase 2.
+  description: Versioned event ingestion contract. Read-only dashboard endpoints are documented in docs/read-api.md and require Cloudflare Access protection on the configured dashboard hostname.
 servers:
   - url: https://monitor.example.invalid
 paths:
