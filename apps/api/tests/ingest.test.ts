@@ -1,5 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { isGrowthAnomaly } from "../src/repository-stats";
 
 let tokenCounter = 0;
 
@@ -126,11 +127,13 @@ function completedEvent(
     runId?: string;
     operation?: string;
     repositoryKey?: string;
+    jobKey?: string;
     sourceRepositoryKey?: string;
     exitCode?: number;
     startedAt?: number;
     finishedAt?: number;
     metrics?: Record<string, unknown>;
+    repositoryStats?: Record<string, unknown>;
     errorSummary?: string;
   } = {},
 ) {
@@ -144,7 +147,7 @@ function completedEvent(
     workflow_id: `workflow-${crypto.randomUUID().replaceAll("-", "")}`,
     event_type: "run.completed",
     occurred_at: new Date(finishedAt).toISOString(),
-    job_key: fixture.jobKey,
+    job_key: overrides.jobKey ?? fixture.jobKey,
     repository_key: overrides.repositoryKey ?? fixture.repositoryKey,
     ...(operation === "copy" ? { source_repository_key: overrides.sourceRepositoryKey ?? fixture.sourceRepositoryKey } : {}),
     operation,
@@ -156,6 +159,7 @@ function completedEvent(
       duration_ms: finishedAt - startedAt,
       ...(overrides.errorSummary === undefined ? {} : { error_summary: overrides.errorSummary }),
       ...(overrides.metrics === undefined ? {} : { metrics: overrides.metrics }),
+      ...(overrides.repositoryStats === undefined ? {} : { repository_stats: overrides.repositoryStats }),
     },
   };
 }
@@ -245,6 +249,243 @@ describe("event ingestion", () => {
         .first<{ status: string }>();
       expect(row?.status).toBe(item.expected);
     }
+  });
+
+  it("stores Restic stats, opens one growth alert after the baseline, and resolves it once", async () => {
+    const fixture = await seedFixture();
+    const baseline = 1024 * 1024 * 1024;
+    for (let index = 0; index < 5; index += 1) {
+      const finishedAt = fixture.now - 60_000 + index * 1000;
+      const event = completedEvent(fixture, {
+        operation: "stats",
+        startedAt: finishedAt - 1000,
+        finishedAt,
+        repositoryStats: { mode: "restore-size", value_bytes: baseline, snapshots_count: 4 },
+      });
+      expect((await sendEvent(event, fixture.token)).status).toBe(200);
+    }
+
+    const spikeAt = fixture.now - 20_000;
+    const spike = completedEvent(fixture, {
+      operation: "stats",
+      startedAt: spikeAt - 1000,
+      finishedAt: spikeAt,
+      repositoryStats: { mode: "restore-size", value_bytes: baseline + 600 * 1024 * 1024 },
+    });
+    expect((await sendEvent(spike, fixture.token)).status).toBe(200);
+    expect((await sendEvent(spike, fixture.token)).status).toBe(200);
+    expect(
+      await env.DB.prepare("SELECT count(*) AS count FROM repository_stats WHERE source_run_id = ?")
+        .bind(spike.run_id)
+        .first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+
+    expect(
+      await env.DB.prepare(
+        "SELECT measurement_type, value_bytes, job_id, is_anomalous FROM repository_stats WHERE source_run_id = ?",
+      )
+        .bind(spike.run_id)
+        .first(),
+    ).toEqual({
+      measurement_type: "restic_restore_size",
+      value_bytes: baseline + 600 * 1024 * 1024,
+      job_id: fixture.jobId,
+      is_anomalous: 1,
+    });
+    expect(
+      await env.DB.prepare(
+        "SELECT rule_key, status, baseline_value_bytes, repository_id, measurement_type FROM alerts WHERE run_id = ?",
+      )
+        .bind(spike.run_id)
+        .first(),
+    ).toMatchObject({
+      rule_key: "repository_growth",
+      status: "open",
+      baseline_value_bytes: baseline,
+      measurement_type: "restic_restore_size",
+    });
+    expect(
+      await env.DB.prepare("SELECT count(*) AS count FROM alerts WHERE rule_key = 'repository_growth' AND job_id = ?")
+        .bind(fixture.jobId)
+        .first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    const alert = await env.DB.prepare("SELECT id FROM alerts WHERE run_id = ?")
+      .bind(spike.run_id)
+      .first<{ id: string }>();
+    expect(alert).not.toBeNull();
+    expect(await count("notification_deliveries", "alert_id", alert!.id)).toBe(1);
+
+    const repeatedSpikeAt = fixture.now - 15_000;
+    const repeatedSpike = completedEvent(fixture, {
+      operation: "stats",
+      startedAt: repeatedSpikeAt - 1000,
+      finishedAt: repeatedSpikeAt,
+      repositoryStats: { mode: "restore-size", value_bytes: baseline + 900 * 1024 * 1024 },
+    });
+    expect((await sendEvent(repeatedSpike, fixture.token)).status).toBe(200);
+    expect(
+      await env.DB.prepare("SELECT count(*) AS count FROM alerts WHERE rule_key = 'repository_growth' AND job_id = ?")
+        .bind(fixture.jobId)
+        .first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+    expect(await count("notification_deliveries", "alert_id", alert!.id)).toBe(1);
+
+    const staleAt = fixture.now - 30_000;
+    const stale = completedEvent(fixture, {
+      operation: "stats",
+      startedAt: staleAt - 1000,
+      finishedAt: staleAt,
+      repositoryStats: { mode: "restore-size", value_bytes: baseline + 1_000_000 },
+    });
+    expect((await sendEvent(stale, fixture.token)).status).toBe(200);
+    expect(
+      await env.DB.prepare("SELECT status FROM alerts WHERE run_id = ?")
+        .bind(spike.run_id)
+        .first(),
+    ).toEqual({ status: "open" });
+
+    const recoveryAt = fixture.now - 10_000;
+    const recovery = completedEvent(fixture, {
+      operation: "stats",
+      startedAt: recoveryAt - 1000,
+      finishedAt: recoveryAt,
+      repositoryStats: { mode: "restore-size", value_bytes: baseline + 50 * 1024 * 1024 },
+    });
+    expect((await sendEvent(recovery, fixture.token)).status).toBe(200);
+    expect((await sendEvent(recovery, fixture.token)).status).toBe(200);
+    expect(
+      await env.DB.prepare("SELECT status, resolved_at FROM alerts WHERE run_id = ?")
+        .bind(spike.run_id)
+        .first(),
+    ).toMatchObject({ status: "resolved" });
+    expect(
+      await env.DB.prepare(
+        "SELECT notification_type FROM notification_deliveries WHERE alert_id = (SELECT id FROM alerts WHERE run_id = ?)",
+      )
+        .bind(spike.run_id)
+        .all(),
+    ).toMatchObject({ results: [{ notification_type: "open" }, { notification_type: "recovery" }] });
+  });
+
+  it("keeps Repository stats baselines separate by Job and Restic mode", async () => {
+    const fixture = await seedFixture();
+    const weeklyJobKey = `weekly-${crypto.randomUUID().replaceAll("-", "")}`;
+    const weeklyJobId = `job-weekly-${crypto.randomUUID().replaceAll("-", "")}`;
+    await env.DB.prepare(
+      `INSERT INTO jobs (
+         id, host_id, job_key, name, schedule, timezone, grace_seconds, timeout_seconds, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(weeklyJobId, fixture.hostId, weeklyJobKey, "Weekly stats", "0 6 * * 0", "UTC", 300, 3600, fixture.now)
+      .run();
+    const repository = await env.DB.prepare("SELECT id FROM repositories WHERE repository_key = ?")
+      .bind(fixture.repositoryKey)
+      .first<{ id: string }>();
+    await env.DB.prepare(
+      "INSERT INTO job_repositories (job_id, repository_id, role) VALUES (?, ?, 'repository')",
+    )
+      .bind(weeklyJobId, repository!.id)
+      .run();
+
+    for (let index = 0; index < 5; index += 1) {
+      const finishedAt = fixture.now - 70_000 + index * 1000;
+      const daily = completedEvent(fixture, {
+        operation: "stats",
+        startedAt: finishedAt - 1000,
+        finishedAt,
+        repositoryStats: { mode: "restore-size", value_bytes: 1024 * 1024 * 1024 },
+      });
+      expect((await sendEvent(daily, fixture.token)).status).toBe(200);
+    }
+
+    const weeklyAt = fixture.now - 20_000;
+    const weekly = completedEvent(fixture, {
+      operation: "stats",
+      jobKey: weeklyJobKey,
+      startedAt: weeklyAt - 1000,
+      finishedAt: weeklyAt,
+      repositoryStats: { mode: "restore-size", value_bytes: 2 * 1024 * 1024 * 1024 },
+    });
+    const raw = completedEvent(fixture, {
+      operation: "stats",
+      startedAt: weeklyAt - 1000,
+      finishedAt: weeklyAt,
+      repositoryStats: { mode: "raw-data", value_bytes: 2 * 1024 * 1024 * 1024 },
+    });
+    expect((await sendEvent(weekly, fixture.token)).status).toBe(200);
+    expect((await sendEvent(raw, fixture.token)).status).toBe(200);
+    expect(
+      await env.DB.prepare("SELECT count(*) AS count FROM alerts WHERE rule_key = 'repository_growth' AND job_id IN (?, ?)")
+        .bind(fixture.jobId, weeklyJobId)
+        .first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+  });
+
+  it("does not alert before five normal measurements establish a baseline", async () => {
+    const fixture = await seedFixture();
+    for (let index = 0; index < 4; index += 1) {
+      const finishedAt = fixture.now - 50_000 + index * 1000;
+      const event = completedEvent(fixture, {
+        operation: "stats",
+        startedAt: finishedAt - 1000,
+        finishedAt,
+        repositoryStats: { mode: "restore-size", value_bytes: 1024 * 1024 * 1024 },
+      });
+      expect((await sendEvent(event, fixture.token)).status).toBe(200);
+    }
+    const finishedAt = fixture.now - 20_000;
+    const spike = completedEvent(fixture, {
+      operation: "stats",
+      startedAt: finishedAt - 1000,
+      finishedAt,
+      repositoryStats: { mode: "restore-size", value_bytes: 3 * 1024 * 1024 * 1024 },
+    });
+    expect((await sendEvent(spike, fixture.token)).status).toBe(200);
+    expect(
+      await env.DB.prepare("SELECT count(*) AS count FROM alerts WHERE rule_key = 'repository_growth' AND job_id = ?")
+        .bind(fixture.jobId)
+        .first<{ count: number }>(),
+    ).toEqual({ count: 0 });
+  });
+
+  it("requires both relative and absolute growth thresholds", () => {
+    const base = 100 * 1024 * 1024;
+    expect(isGrowthAnomaly(base + 99 * 1024 * 1024, base)).toBe(false);
+    expect(isGrowthAnomaly(base + 100 * 1024 * 1024, base)).toBe(true);
+    expect(isGrowthAnomaly(1024 * 1024 * 1024 + 511 * 1024 * 1024, 1024 * 1024 * 1024)).toBe(false);
+    expect(isGrowthAnomaly(1024 * 1024 * 1024 + 512 * 1024 * 1024, 1024 * 1024 * 1024)).toBe(true);
+  });
+
+  it("removes at most one hundred Repository measurements older than retention", async () => {
+    const fixture = await seedFixture();
+    const repository = await env.DB.prepare("SELECT id FROM repositories WHERE repository_key = ?")
+      .bind(fixture.repositoryKey)
+      .first<{ id: string }>();
+    const staleAt = fixture.now - 401 * 86_400_000;
+    const stalePrefix = `expired-stat-${crypto.randomUUID().replaceAll("-", "")}`;
+    const staleIds = Array.from({ length: 101 }, (_, index) => `${stalePrefix}-${index}`);
+    const staleStatements = staleIds.map((id) => env.DB.prepare(
+      `INSERT INTO repository_stats (
+         id, repository_id, measurement_type, value_bytes, measured_at, details_json, created_at, job_id
+       ) VALUES (?, ?, 'restic_restore_size', 1, ?, '{}', ?, ?)`,
+    ).bind(id, repository!.id, staleAt, fixture.now, fixture.jobId));
+    await env.DB.batch(staleStatements.slice(0, 100));
+    await env.DB.batch(staleStatements.slice(100));
+
+    const finishedAt = fixture.now - 10_000;
+    const measurement = completedEvent(fixture, {
+      operation: "stats",
+      startedAt: finishedAt - 1000,
+      finishedAt,
+      repositoryStats: { mode: "restore-size", value_bytes: 1024 },
+    });
+    expect((await sendEvent(measurement, fixture.token)).status).toBe(200);
+    const remaining = await env.DB.prepare(
+      "SELECT count(*) AS count FROM repository_stats WHERE id LIKE ?",
+    )
+      .bind(`${stalePrefix}-%`)
+      .first<{ count: number }>();
+    expect(remaining?.count).toBe(1);
   });
 
   it("moves a run from running to its terminal result", async () => {
@@ -504,6 +745,19 @@ describe("event ingestion", () => {
       metrics: { bytes_processed: 1234 },
     });
     expect((await sendEvent(unsupportedMetrics, fixture.token)).status).toBe(422);
+
+    const unsupportedRepositoryStats = completedEvent(fixture, {
+      operation: "backup",
+      repositoryStats: { mode: "restore-size", value_bytes: 1234 },
+    });
+    expect((await sendEvent(unsupportedRepositoryStats, fixture.token)).status).toBe(422);
+
+    const failedStats = completedEvent(fixture, {
+      operation: "stats",
+      exitCode: 1,
+      repositoryStats: { mode: "restore-size", value_bytes: 1234 },
+    });
+    expect((await sendEvent(failedStats, fixture.token)).status).toBe(422);
 
     const future = startEvent(fixture, {
       occurred_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),

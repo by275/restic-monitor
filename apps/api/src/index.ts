@@ -3,6 +3,10 @@ import { Hono, type Context } from "hono";
 import eventSchema from "../../../packages/protocol/schemas/event-v1.schema.json";
 import readApi from "./read";
 import { queueRecoveryNotification, runNotificationTick } from "./notifications";
+import {
+  prepareRepositoryStatsStatements,
+  type RepositoryStatsMeasurement,
+} from "./repository-stats";
 import { runScheduleTick } from "./scheduler";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -48,6 +52,7 @@ interface RunResult {
   duration_ms: number;
   error_summary?: string;
   metrics?: EventMetrics;
+  repository_stats?: RepositoryStatsMeasurement;
 }
 
 interface EventBase {
@@ -102,6 +107,7 @@ interface RepositoryBinding {
 
 interface AuthorizedEventContext {
   job_id: string;
+  host_id: string;
   repositories: RepositoryBinding[];
 }
 
@@ -345,6 +351,29 @@ app.post("/api/v1/ingest/events", async (context) => {
         receivedAt,
       ),
     );
+
+    if (event.operation === "stats" && event.result.exit_code === 0 && event.result.repository_stats !== undefined) {
+      const repository = authorizedContext.repositories.find(({ role }) => role === "repository");
+      if (repository === undefined) {
+        return context.json({ error: "event_scope_forbidden" }, 403);
+      }
+      try {
+        statements.push(
+          ...await prepareRepositoryStatsStatements(context.env.DB, {
+            jobId: authorizedContext.job_id,
+            hostId: authorizedContext.host_id,
+            repositoryId: repository.repository_id,
+            repositoryKey: event.repository_key,
+            runId: event.run_id,
+            measuredAt: finishAt!,
+            receivedAt,
+            measurement: event.result.repository_stats,
+          }),
+        );
+      } catch {
+        return context.json({ error: "temporarily_unavailable" }, 503);
+      }
+    }
   }
 
   try {
@@ -484,6 +513,10 @@ function validateEventSemantics(event: RunEvent, now: number): string | null {
   ) {
     return "metrics_not_supported_for_operation";
   }
+  if (event.result.repository_stats !== undefined) {
+    if (event.operation !== "stats") return "repository_stats_not_supported_for_operation";
+    if (event.result.exit_code !== 0) return "repository_stats_require_success";
+  }
 
   const startedAt = parseUtcDateTime(event.result.started_at);
   const finishedAt = parseUtcDateTime(event.result.finished_at);
@@ -527,10 +560,10 @@ async function authorizeEvent(
   db: D1Database,
 ): Promise<AuthorizedEventContext | null> {
   const job = await db.prepare(
-    "SELECT id FROM jobs WHERE host_id = ? AND job_key = ? AND enabled = 1",
+    "SELECT id, host_id FROM jobs WHERE host_id = ? AND job_key = ? AND enabled = 1",
   )
     .bind(hostId, event.job_key)
-    .first<{ id: string }>();
+    .first<{ id: string; host_id: string }>();
   if (job === null) return null;
 
   if (event.operation === "copy") {
@@ -540,6 +573,7 @@ async function authorizeEvent(
     if (source === null || target === null) return null;
     return {
       job_id: job.id,
+      host_id: job.host_id,
       repositories: [
         { role: "source", repository_id: source.id },
         { role: "target", repository_id: target.id },
@@ -551,6 +585,7 @@ async function authorizeEvent(
   if (repository === null) return null;
   return {
     job_id: job.id,
+    host_id: job.host_id,
     repositories: [{ role: "repository", repository_id: repository.id }],
   };
 }
@@ -604,6 +639,16 @@ async function createCompletionFingerprint(
             files_changed: metrics.files_changed ?? null,
             files_unmodified: metrics.files_unmodified ?? null,
             snapshot_id: metrics.snapshot_id ?? null,
+          },
+      repository_stats: event.result.repository_stats === undefined
+        ? null
+        : {
+            mode: event.result.repository_stats.mode,
+            value_bytes: event.result.repository_stats.value_bytes,
+            total_file_count: event.result.repository_stats.total_file_count ?? null,
+            total_blob_count: event.result.repository_stats.total_blob_count ?? null,
+            snapshots_count: event.result.repository_stats.snapshots_count ?? null,
+            total_uncompressed_size: event.result.repository_stats.total_uncompressed_size ?? null,
           },
     },
   };

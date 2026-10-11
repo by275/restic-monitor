@@ -106,6 +106,19 @@
             }
           },
           "additionalProperties": true
+        },
+        "repository_stats": {
+          "type": "object",
+          "required": ["mode", "value_bytes"],
+          "properties": {
+            "mode": { "enum": ["restore-size", "raw-data"] },
+            "value_bytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "total_file_count": { "$ref": "#/$defs/counter" },
+            "total_blob_count": { "$ref": "#/$defs/counter" },
+            "snapshots_count": { "$ref": "#/$defs/counter" },
+            "total_uncompressed_size": { "$ref": "#/$defs/counter" }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": true

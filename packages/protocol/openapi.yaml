@@ -25,6 +25,9 @@ paths:
               completed:
                 summary: A run has completed
                 externalValue: './examples/run.completed.json'
+              repositoryStats:
+                summary: A successful Restic Repository stats measurement
+                externalValue: './examples/run.stats.completed.json'
       responses:
         '200':
           description: Event accepted or previously accepted with the same payload hash

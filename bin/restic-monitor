@@ -557,6 +557,28 @@ collect_backup_metrics() {
   ' "$stdout_file" 2>/dev/null
 }
 
+collect_repository_stats() {
+  local stdout_file=$1 mode=$2
+  jq -s -c --arg mode "$mode" '
+    def counter:
+      if type == "number" and . >= 0 and . <= 9007199254740991 and floor == . then . else null end;
+    if length != 1 or (.[0] | type) != "object" then empty else
+      .[0] as $stats |
+      ($stats.total_size | counter) as $value |
+      if $value == null then empty else
+        {
+          mode: $mode,
+          value_bytes: $value,
+          total_file_count: ($stats.total_file_count | counter),
+          total_blob_count: ($stats.total_blob_count | counter),
+          snapshots_count: ($stats.snapshots_count | counter),
+          total_uncompressed_size: ($stats.total_uncompressed_size | counter)
+        } | with_entries(select(.value != null))
+      end
+    end
+  ' "$stdout_file" 2>/dev/null
+}
+
 sanitize_error_json() {
   local stderr_file=$1
   tail -c 8192 -- "$stderr_file" 2>/dev/null | tr -d '\000' | jq -Rs '
@@ -574,7 +596,7 @@ build_completed_event() {
   local output_file=$1 event_id=$2 run_id=$3 workflow_id=$4 occurred_at=$5
   local job_key=$6 repository_key=$7 operation=$8 source_repository_key=$9
   local exit_code=${10} started_at=${11} finished_at=${12} duration_ms=${13}
-  local metrics_json=${14} error_json=${15}
+  local metrics_json=${14} repository_stats_json=${15} error_json=${16}
   local client_name=${RESTIC_MONITOR_CLIENT_NAME:-restic-monitor-bash}
   local client_version=${RESTIC_MONITOR_CLIENT_VERSION:-$VERSION}
   [[ -n $client_name && ${#client_name} -le 64 ]] || client_name=restic-monitor-bash
@@ -595,10 +617,12 @@ build_completed_event() {
     --arg finished_at "$finished_at" \
     --argjson duration_ms "$duration_ms" \
     --argjson metrics "$metrics_json" \
+    --argjson repository_stats "$repository_stats_json" \
     --argjson error_summary "$error_json" \
     '{schema_version:1,event_id:$event_id,run_id:$run_id,event_type:"run.completed",occurred_at:$occurred_at,job_key:$job_key,repository_key:$repository_key,operation:$operation,client:{name:$client_name,version:$client_version},result:({exit_code:$exit_code,started_at:$started_at,finished_at:$finished_at,duration_ms:$duration_ms} +
       (if $error_summary == null or $error_summary == "" then {} else {error_summary:$error_summary} end) +
-      (if ($metrics | length) == 0 then {} else {metrics:$metrics} end))} +
+      (if ($metrics | length) == 0 then {} else {metrics:$metrics} end) +
+      (if ($repository_stats | length) == 0 then {} else {repository_stats:$repository_stats} end))} +
      (if $workflow_id == "" then {} else {workflow_id:$workflow_id} end) +
      (if $source_repository_key == "" then {} else {source_repository_key:$source_repository_key} end)' \
     > "$output_file"
@@ -705,7 +729,7 @@ run_command() {
   if [[ -n $start_flush_pid ]]; then
     wait "$start_flush_pid" 2>/dev/null || true
   fi
-  local finish_epoch finish_time duration_ms metrics_json='{}' error_json='null' has_json=0
+  local finish_epoch finish_time duration_ms metrics_json='{}' repository_stats_json='{}' error_json='null' has_json=0
   finish_epoch=$(date -u +%s)
   finish_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   duration_ms=$(((finish_epoch - start_epoch) * 1000))
@@ -726,8 +750,33 @@ run_command() {
         fi
         ;;
       stats)
-        if [[ -s $stdout_file ]] && ! jq -e 'type == "object"' "$stdout_file" >/dev/null 2>&1; then
-          log 'stats JSON output was malformed; event will include no metrics'
+        local stats_mode='' stats_mode_count=0 stats_index
+        for ((stats_index = 0; stats_index < ${#restic_args[@]}; stats_index++)); do
+          case ${restic_args[$stats_index]} in
+            --mode)
+              ((stats_index += 1))
+              if ((stats_index < ${#restic_args[@]})); then
+                stats_mode=${restic_args[$stats_index]}
+              else
+                stats_mode=''
+              fi
+              ((stats_mode_count += 1))
+              ;;
+            --mode=*)
+              stats_mode=${restic_args[$stats_index]#--mode=}
+              ((stats_mode_count += 1))
+              ;;
+          esac
+        done
+        if (( restic_exit_code == 0 && stats_mode_count == 1 )) &&
+           [[ $stats_mode == restore-size || $stats_mode == raw-data ]]; then
+          repository_stats_json=$(collect_repository_stats "$stdout_file" "$stats_mode" 2>/dev/null) || repository_stats_json='{}'
+          [[ -n $repository_stats_json ]] || repository_stats_json='{}'
+          if [[ $repository_stats_json == '{}' ]]; then
+            log 'stats JSON output was invalid for the selected mode; event will include no repository measurement'
+          fi
+        elif (( stats_mode_count != 1 )) || [[ $stats_mode != restore-size && $stats_mode != raw-data ]]; then
+          log 'stats measurement requires exactly one supported --mode (restore-size or raw-data)'
         fi
         ;;
       prune|forget_prune)
@@ -743,7 +792,7 @@ run_command() {
   if (( reporting_ready == 1 )); then
     if build_completed_event "$complete_event_file" "$complete_event_id" "$run_id" "$workflow_id" "$finish_time" \
       "$job_key" "$repository_key" "$operation" "$source_repository_key" "$restic_exit_code" \
-      "$start_time" "$finish_time" "$duration_ms" "$metrics_json" "$error_json" &&
+      "$start_time" "$finish_time" "$duration_ms" "$metrics_json" "$repository_stats_json" "$error_json" &&
       enqueue_event_file "$complete_event_file"; then
       if [[ -n ${RESTIC_MONITOR_API_URL:-} && -n ${RESTIC_MONITOR_TOKEN:-} ]]; then
         "$SELF_PATH" flush --once >/dev/null 2>&1 || log 'one or more events remain queued for a later flush'

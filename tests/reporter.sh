@@ -267,7 +267,7 @@ for fixture in backup.no-snapshot.jsonl backup.oversized-counter.jsonl backup.ma
   esac
 done
 
-for case_name in 'forget:forget.json:forget --json' 'stats:stats.json:stats --json' 'prune:prune.txt:prune' 'forget_prune:forget-prune.mixed:forget --prune --json'; do
+for case_name in 'forget:forget.json:forget --json' 'stats:stats.json:stats --mode restore-size --json' 'prune:prune.txt:prune' 'forget_prune:forget-prune.mixed:forget --prune --json'; do
   IFS=: read -r operation fixture restic_command <<< "$case_name"
   setup_spool "operation-$operation"
   export FAKE_RESTIC_EXIT_CODE=0
@@ -282,10 +282,90 @@ for case_name in 'forget:forget.json:forget --json' 'stats:stats.json:stats --js
   "$REPORTER" run --job daily --repository repo-a --operation "$operation" --restic-bin "$FAKE_RESTIC" -- "${restic_args[@]}" >/dev/null 2> "$TEST_DIR/operation-log"
   completed_file=$(find "$FAKE_REQUEST_DIR" -type f -name '*.json' -exec grep -l 'run.completed' {} \; | head -1)
   jq -e '.result | has("metrics") | not' "$completed_file" >/dev/null || fail "$operation must not send backup-only metrics"
+  if [[ $operation == stats ]]; then
+    jq -e '.result.repository_stats.mode == "restore-size" and .result.repository_stats.value_bytes == 8192 and .result.repository_stats.total_file_count == 4' "$completed_file" >/dev/null || fail 'stats mode and total_size must become typed repository measurement'
+  else
+    jq -e '.result | has("repository_stats") | not' "$completed_file" >/dev/null || fail "$operation must not send repository statistics"
+  fi
   if [[ $operation == forget ]]; then
     ! grep -q 'private/path' "$completed_file" || fail 'forget snapshot paths must not be sent'
   fi
 done
+
+setup_spool stats-raw-data
+export FAKE_RESTIC_EXIT_CODE=0
+export FAKE_RESTIC_STDOUT="$FIXTURES/stats.json"
+export FAKE_RESTIC_STDERR="$TEST_DIR/empty-stderr"
+export FAKE_CURL_STATE="$TEST_DIR/curl-count-stats-raw-data"
+export FAKE_REQUEST_DIR="$TEST_DIR/requests-stats-raw-data"
+mkdir -p -- "$FAKE_REQUEST_DIR"
+printf '0\n' > "$FAKE_CURL_STATE"
+"$REPORTER" run --job daily --repository repo-a --operation stats --restic-bin "$FAKE_RESTIC" -- stats --mode=raw-data --json >/dev/null 2> "$TEST_DIR/stats-raw-log"
+completed_file=$(find "$FAKE_REQUEST_DIR" -type f -name '*.json' -exec grep -l 'run.completed' {} \; | head -1)
+jq -e '.result.repository_stats.mode == "raw-data" and .result.repository_stats.value_bytes == 8192' "$completed_file" >/dev/null || fail 'raw-data measurement mode must be preserved'
+
+setup_spool stats-without-mode
+export FAKE_RESTIC_EXIT_CODE=0
+export FAKE_RESTIC_STDOUT="$FIXTURES/stats.json"
+export FAKE_RESTIC_STDERR="$TEST_DIR/empty-stderr"
+export FAKE_CURL_STATE="$TEST_DIR/curl-count-stats-without-mode"
+export FAKE_REQUEST_DIR="$TEST_DIR/requests-stats-without-mode"
+mkdir -p -- "$FAKE_REQUEST_DIR"
+printf '0\n' > "$FAKE_CURL_STATE"
+"$REPORTER" run --job daily --repository repo-a --operation stats --restic-bin "$FAKE_RESTIC" -- stats --json >/dev/null 2> "$TEST_DIR/stats-without-mode-log"
+completed_file=$(find "$FAKE_REQUEST_DIR" -type f -name '*.json' -exec grep -l 'run.completed' {} \; | head -1)
+jq -e '.result | has("repository_stats") | not' "$completed_file" >/dev/null || fail 'stats without an explicit mode must not be measured'
+
+for mode_case in duplicate unsupported; do
+  setup_spool "stats-$mode_case-mode"
+  export FAKE_RESTIC_EXIT_CODE=0
+  export FAKE_RESTIC_STDOUT="$FIXTURES/stats.json"
+  export FAKE_RESTIC_STDERR="$TEST_DIR/empty-stderr"
+  export FAKE_CURL_STATE="$TEST_DIR/curl-count-stats-$mode_case-mode"
+  export FAKE_REQUEST_DIR="$TEST_DIR/requests-stats-$mode_case-mode"
+  mkdir -p -- "$FAKE_REQUEST_DIR"
+  printf '0\n' > "$FAKE_CURL_STATE"
+  if [[ $mode_case == duplicate ]]; then
+    "$REPORTER" run --job daily --repository repo-a --operation stats --restic-bin "$FAKE_RESTIC" -- stats --mode restore-size --mode raw-data --json >/dev/null 2> "$TEST_DIR/stats-duplicate-mode-log"
+  else
+    "$REPORTER" run --job daily --repository repo-a --operation stats --restic-bin "$FAKE_RESTIC" -- stats --mode files-by-contents --json >/dev/null 2> "$TEST_DIR/stats-unsupported-mode-log"
+  fi
+  completed_file=$(find "$FAKE_REQUEST_DIR" -type f -name '*.json' -exec grep -l 'run.completed' {} \; | head -1)
+  jq -e '.result | has("repository_stats") | not' "$completed_file" >/dev/null || fail "$mode_case stats mode must not produce a measurement"
+done
+
+for stats_case in malformed oversized; do
+  setup_spool "stats-$stats_case"
+  export FAKE_RESTIC_EXIT_CODE=0
+  export FAKE_RESTIC_STDERR="$TEST_DIR/empty-stderr"
+  export FAKE_CURL_STATE="$TEST_DIR/curl-count-stats-$stats_case"
+  export FAKE_REQUEST_DIR="$TEST_DIR/requests-stats-$stats_case"
+  mkdir -p -- "$FAKE_REQUEST_DIR"
+  printf '0\n' > "$FAKE_CURL_STATE"
+  if [[ $stats_case == malformed ]]; then
+    printf '{not-json\n' > "$TEST_DIR/stats-$stats_case.json"
+  else
+    printf '{"total_size":9007199254740992}\n' > "$TEST_DIR/stats-$stats_case.json"
+  fi
+  export FAKE_RESTIC_STDOUT="$TEST_DIR/stats-$stats_case.json"
+  "$REPORTER" run --job daily --repository repo-a --operation stats --restic-bin "$FAKE_RESTIC" -- stats --mode restore-size --json >/dev/null 2> "$TEST_DIR/stats-$stats_case-log"
+  completed_file=$(find "$FAKE_REQUEST_DIR" -type f -name '*.json' -exec grep -l 'run.completed' {} \; | head -1)
+  jq -e '.result | has("repository_stats") | not' "$completed_file" >/dev/null || fail "$stats_case stats output must not produce a measurement"
+done
+
+setup_spool stats-failed
+status=0
+export FAKE_RESTIC_EXIT_CODE=1
+export FAKE_RESTIC_STDOUT="$FIXTURES/stats.json"
+export FAKE_RESTIC_STDERR="$TEST_DIR/empty-stderr"
+export FAKE_CURL_STATE="$TEST_DIR/curl-count-stats-failed"
+export FAKE_REQUEST_DIR="$TEST_DIR/requests-stats-failed"
+mkdir -p -- "$FAKE_REQUEST_DIR"
+printf '0\n' > "$FAKE_CURL_STATE"
+"$REPORTER" run --job daily --repository repo-a --operation stats --restic-bin "$FAKE_RESTIC" -- stats --mode restore-size --json >/dev/null 2> "$TEST_DIR/stats-failed-log" || status=$?
+assert_eq 1 "${status:-0}" 'stats reporting must preserve the Restic exit status'
+completed_file=$(find "$FAKE_REQUEST_DIR" -type f -name '*.json' -exec grep -l 'run.completed' {} \; | head -1)
+jq -e '.result | has("repository_stats") | not' "$completed_file" >/dev/null || fail 'failed stats commands must not produce a measurement'
 
 setup_spool no-api
 export FAKE_RESTIC_EXIT_CODE=3

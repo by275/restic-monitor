@@ -1,6 +1,6 @@
 # Restic Monitor 구현 계획 및 기술 검토
 
-- 상태: 1~6단계 구현 완료 및 로컬 검증됨. 다음은 7단계 Repository stats이며 별도 승인이 필요하다.
+- 상태: 1~7단계 구현 완료 및 로컬 검증됨. 다음은 8단계 Docker/cron 통합 파일럿이며 별도 승인이 필요하다.
 - 기준일: 2026-10-11
 - 설계 입력: [Restic Monitor 설계 대화](https://chatgpt.com/share/6acafa87-5670-83ee-8073-35f9da97447e)
 - 저장소 상태: 계획 작성 당시 작업 디렉터리에 기존 코드나 백업 환경 파일이 없었다. 실제 Docker/cron 스크립트는 구현 전 통합 단계에서 확인해야 한다.
@@ -119,6 +119,8 @@ v1의 숫자 지표는 JavaScript와 SQLite 경계에서 정확성을 보장하�
 
 `bytes_added`는 Restic `data_added`(압축 전), `bytes_added_packed`는 `data_added_packed`(압축 후), `bytes_processed`는 `total_bytes_processed`로 매핑한다. 필드가 없거나 snapshot이 생성되지 않은 경우 `null`/미포함으로 보존하고 0으로 추정하지 않는다.
 
+Repository stats는 `run.completed.result.repository_stats`에 `mode`와 `value_bytes`를 담는다. v1은 `restore-size`와 `raw-data`만 지원하며 Restic의 mode 종속 `total_size`를 이름만으로 해석하지 않는다. API는 이를 `restic_restore_size`/`restic_raw_data` 시계열로 변환한다. backup 증분 지표와 별도 필드·테이블에 두며 backend 저장공간 사용량은 이 데이터로 추정하지 않는다.
+
 ### 응답과 재시도
 
 - `200`: 저장 완료 또는 같은 payload의 중복 수락. 응답에 `event_id`, `accepted`, `duplicate`, `received_at`을 포함한다.
@@ -146,7 +148,7 @@ v1의 숫자 지표는 JavaScript와 SQLite 경계에서 정확성을 보장하�
 | `run_repositories` | 실행과 Repository의 연결. 일반 작업은 `repository` 역할 하나를, copy는 `source`와 `target` 역할을 저장하며 `(run_id, repository_id, role)`을 유일하게 둠 |
 | `run_metrics` | run당 operation별 공통 지표와 `metrics_json`. 크기 제한과 operation별 스키마 검증 |
 | `ingest_events` | `PRIMARY KEY(token_id, event_id)`, run/event type, payload hash, server receive time. 이벤트 유효 기간 및 보존 정책 |
-| `repository_stats` | Repository 전체 측정 시계열. `measurement_type`을 저장해 restore-size, Restic raw-data, 실제 backend 용량을 구별 |
+| `repository_stats` | Repository 시계열. `measurement_type`, nullable `job_id`, `is_anomalous`, source run과 정확한 byte 값을 저장해 Job/mode별 baseline을 구별 |
 | `schedule_occurrences` | `(job_id, scheduled_for)` 유일한 예정 실행 슬롯과 상태, 매칭 run/late 경보. Worker Cron 지연 실행 뒤에도 누락 슬롯을 재구성 |
 | `alerts` | 고유 `dedupe_key`, rule/severity/status, 열린/해결 시각, 연결 Job/run/occurrence |
 | `notification_deliveries` | alert와 채널별 outbox, attempts, `next_attempt_at`, last error, sent time, 재시도 상태 |
@@ -247,11 +249,15 @@ Spool은 `pending/`, `quarantine/`, private `tmp/` 아래에 둔다. 각 이벤�
 
 ### 7단계 — Repository stats와 이상 증가 탐지
 
-**작업:** 명시적인 Restic `stats --mode ... --json` 측정, 측정 종류 표시, 보존/정리 정책, 충분한 정상 표본 이후의 단순 성장 이상 규칙을 구현한다. backend 물리 용량은 별도 수집기가 없으면 “미측정”으로 표시한다.
+**작업:** Bash Reporter는 성공한 `restic stats --mode restore-size|raw-data --json`에서 `total_size`를 읽어 언어 중립적인 `repository_stats` 결과로 전송한다. 모드가 생략/중복/지원 불가거나 stdout이 유효한 단일 JSON 객체가 아니면 측정값을 보내지 않는다. stats 실행 실패도 시계열에 넣지 않는다. API는 run, 이벤트, Repository 측정, 경보 상태와 outbox 전달 행을 한 D1 batch로 반영한다. 측정은 Repository·Job·mode별로 분리하며 같은 실행/종류의 D1 ID를 써 재전송을 멱등 처리한다. 성공한 stats 측정만 보관하고 400일이 지난 값은 새 측정 시 최대 100행씩 제거한다. D1에는 Job ID와 이상 여부를 저장하고, backend 물리 용량은 별도 수집기가 없으면 “미측정”으로 둔다.
 
-**검증:** 실제 버전 fixture, 측정 scope/mode, 동일 측정 재시도, prune 후 감소, 작은 표본 제외, 일/주간 Job 분리, 경보 억제와 resolve.
+이상 기준은 같은 Job·Repository·mode의 최근 400일 중 직전 정상 측정 최대 7개의 중앙값이다. 정상 표본이 5개 미만이면 경보하지 않는다. 기준보다 50% 이상, 동시에 100MiB 이상 증가하면 warning 경보를 연다. 경보가 열린 동안에는 그 경보의 기준값을 고정하고 추가 이상 측정은 표시만 하며 중복 경보를 만들지 않는다. 최신 시점 측정이 기준 아래로 내려가면 경보를 resolve하고 복구 알림을 outbox에 넣는다. 뒤늦게 도착한 오래된 측정은 경보 생명주기를 변경하지 않는다. 이상 표본은 이후 baseline에서 제외한다.
 
-**완료:** Repository 시계열이 백업 추가량과 구분되고 동일한 의미의 측정끼리 비교된다.
+**검증:** Restic 0.19.1 fixture, 명시적 mode와 잘못된/누락 mode, unsafe counter 및 실패 실행, 같은 측정 재전송, 5개 미만 표본, 성장·경보 억제·복구, 오래된 이벤트 순서, Job/mode 분리, stats 시계열과 `bytes_added` 구분, read API와 대시보드 표시를 검증한다. Fixture는 공식 문서의 형태를 재현한 합성 데이터이므로 실제 저장소 출력 검증은 8단계 파일럿에서 수행한다.
+
+**완료:** Repository 시계열이 백업 추가량과 구분되고 동일한 의미의 측정끼리 비교된다. backend 물리 용량은 측정한 것처럼 표시되지 않는다.
+
+**상태:** 2026-10-11 구현 및 로컬 검증 완료. 운영 Repository의 실제 Restic 출력과 Cloudflare 배포 검증은 8단계 파일럿에서 수행한다.
 
 ### 8단계 — Docker/cron 통합 검증과 한 Host 파일럿
 

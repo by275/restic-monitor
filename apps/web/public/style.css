@@ -118,6 +118,8 @@ tbody tr:hover { background: rgba(86, 148, 220, .045); }
 .chart-area { fill: url(#chart-fill); }
 .chart-line { fill: none; stroke: #63b4ff; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
 .chart-point { fill: #101827; stroke: #8ac8ff; stroke-width: 2; }
+.chart-point-anomalous { fill: #ffb45c; stroke: #ffb45c; }
+.chart-legend { margin: 8px 0 0; color: #93a4ba; font-size: .78rem; }
 .chart-axis { fill: #7187a2; font-size: 9px; }
 .empty-state { padding: 18px; color: var(--muted); font-size: 11px; }
 .notice { margin: 0 0 14px; padding: 12px 15px; border: 1px solid rgba(255, 120, 133, .28); border-radius: 9px; color: #ffc5cb; background: rgba(255, 120, 133, .08); font-size: 12px; }

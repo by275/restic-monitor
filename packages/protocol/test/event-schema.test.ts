@@ -13,6 +13,9 @@ const started = JSON.parse(
 const completed = JSON.parse(
   readFileSync(new URL("../examples/run.completed.json", import.meta.url), "utf8"),
 );
+const statsCompleted = JSON.parse(
+  readFileSync(new URL("../examples/run.stats.completed.json", import.meta.url), "utf8"),
+);
 const ajv = new Ajv2020({ allErrors: true, strict: false });
 addFormats(ajv);
 const validate = ajv.compile(schema);
@@ -21,6 +24,7 @@ describe("event protocol v1 JSON Schema", () => {
   it("accepts the shared started and completed examples", () => {
     expect(validate(started), JSON.stringify(validate.errors)).toBe(true);
     expect(validate(completed), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate(statsCompleted), JSON.stringify(validate.errors)).toBe(true);
   });
 
   it.each([
@@ -33,6 +37,8 @@ describe("event protocol v1 JSON Schema", () => {
     ["negative metric", { ...completed, result: { ...completed.result, metrics: { bytes_added: -1 } } }],
     ["metric beyond exact JSON integer range", { ...completed, result: { ...completed.result, metrics: { bytes_added: 9007199254740992 } } }],
     ["oversized error summary", { ...completed, result: { ...completed.result, error_summary: "x".repeat(1025) } }],
+    ["unknown repository stats mode", { ...statsCompleted, result: { ...statsCompleted.result, repository_stats: { mode: "total_size", value_bytes: 1 } } }],
+    ["unsafe repository stats counter", { ...statsCompleted, result: { ...statsCompleted.result, repository_stats: { mode: "raw-data", value_bytes: 9007199254740992 } } }],
   ])("rejects %s", (_label, event) => {
     expect(validate(event)).toBe(false);
   });

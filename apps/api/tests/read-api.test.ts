@@ -269,10 +269,11 @@ describe("read API", () => {
 
     const base = `/api/v1/read/repositories/${fixture.repositoryKey}/stats?measurement_type=restic_restore_size&limit=2`;
     const first = await (await get(base)).json() as {
-      data: Array<{ value_bytes: number; details: { source: string } }>;
+      data: Array<{ value_bytes: number; details: { source: string }; job_id: string | null; is_anomalous: boolean }>;
       pagination: { has_more: boolean; next_cursor: string | null };
     };
     expect(first.data.map((stat) => stat.value_bytes)).toEqual([29_000, 32_000]);
+    expect(first.data[0]).toMatchObject({ job_id: null, is_anomalous: false });
     expect(first.data[0].details.source).toBe("read-api-test");
     expect(first.pagination.has_more).toBe(true);
     const second = await (await get(`${base}&cursor=${encodeURIComponent(first.pagination.next_cursor!)}`)).json() as typeof first;

@@ -143,8 +143,7 @@
                 <select id="measurement-filter">
                   <option value="restic_restore_size">복원 크기</option>
                   <option value="restic_raw_data">Restic 원시 데이터</option>
-                  <option value="restic_total_size">Restic 전체 크기</option>
-                  <option value="backend_physical_bytes">백엔드 실제 사용량</option>
+                  <option value="backend_physical_bytes">백엔드 실제 사용량 (미수집)</option>
                 </select>
               </label>
             </div>
@@ -163,6 +162,7 @@
                 <div id="stats-chart" class="chart" role="img" aria-label="저장소 측정값 추이">
                   <p class="empty-state">측정 데이터가 없습니다.</p>
                 </div>
+                <p class="chart-legend">주황색 점은 이상 증가로 분류된 측정입니다.</p>
               </div>
             </div>
           </section>

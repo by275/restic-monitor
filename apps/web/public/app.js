@@ -37,8 +37,7 @@ const labels = {
   restore: "복원",
   restic_restore_size: "복원 크기",
   restic_raw_data: "Restic 원시 데이터",
-  restic_total_size: "Restic 전체 크기",
-  backend_physical_bytes: "백엔드 실제 사용량",
+  backend_physical_bytes: "백엔드 실제 사용량 (미수집)",
 };
 
 async function api(path) {
@@ -339,7 +338,7 @@ async function loadStats() {
   const result = await api(`/api/v1/read/repositories/${encodeURIComponent(state.selectedRepository)}/stats?${queryString({ measurement_type: measurementType, limit: "100" })}`);
   document.querySelector("#chart-measurement").textContent = labels[measurementType] || measurementType;
   const latest = result.data[0];
-  document.querySelector("#chart-latest").textContent = latest ? `${formatBytes(latest.value_bytes)} · ${formatDate(latest.measured_at, false)}` : "측정값 없음";
+  document.querySelector("#chart-latest").textContent = latest ? `${latest.is_anomalous ? "이상 증가 · " : ""}${formatBytes(latest.value_bytes)} · ${formatDate(latest.measured_at, false)}` : "측정값 없음";
   renderChart(result.data);
 }
 
@@ -403,12 +402,12 @@ function renderChart(rows) {
   gradient.append(top, bottom);
   defs.append(gradient);
   svg.append(defs, area, line);
-  for (const point of points) {
+  for (const [index, point] of points.entries()) {
     const circle = document.createElementNS(svg.namespaceURI, "circle");
     circle.setAttribute("cx", String(point.x));
     circle.setAttribute("cy", String(point.y));
-    circle.setAttribute("r", "3");
-    circle.setAttribute("class", "chart-point");
+    circle.setAttribute("r", ordered[index].is_anomalous ? "4.5" : "3");
+    circle.setAttribute("class", ordered[index].is_anomalous ? "chart-point chart-point-anomalous" : "chart-point");
     svg.append(circle);
   }
   const leftLabel = document.createElementNS(svg.namespaceURI, "text");

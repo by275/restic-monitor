@@ -94,10 +94,12 @@ interface RepositoryRow {
 interface RepositoryStatRow {
   id: string;
   source_run_id: string | null;
+  job_id: string | null;
   measurement_type: string;
   value_bytes: number;
   measured_at: number;
   details_json: string;
+  is_anomalous: number;
 }
 
 const runSelect = `
@@ -410,7 +412,7 @@ app.get("/repositories/:repositoryKey/stats", async (context) => {
       values.push(key.measured_at, key.measured_at, key.id);
     }
     const result = await context.env.DB.prepare(
-      `SELECT id, source_run_id, measurement_type, value_bytes, measured_at, details_json
+      `SELECT id, source_run_id, job_id, measurement_type, value_bytes, measured_at, details_json, is_anomalous
        FROM repository_stats WHERE ${clauses.join(" AND ")}
        ORDER BY measured_at DESC, id DESC LIMIT ?`,
     )
@@ -425,9 +427,11 @@ app.get("/repositories/:repositoryKey/stats", async (context) => {
         (row) => ({
           id: row.id,
           source_run_id: row.source_run_id,
+          job_id: row.job_id,
           measurement_type: row.measurement_type,
           value_bytes: row.value_bytes,
           measured_at: row.measured_at,
+          is_anomalous: row.is_anomalous === 1,
           details: parseJsonObject(row.details_json),
         }),
         "repository_stats",

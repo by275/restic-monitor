@@ -37,7 +37,7 @@ Optional filters: `enabled=true|false`, `backend_type`, and `q`, a prefix matche
 
 `GET /api/v1/read/repositories/{repositoryKey}/stats`
 
-Optional `measurement_type` filters one of `restic_restore_size`, `restic_raw_data`, `restic_total_size`, or `backend_physical_bytes`. Pagination uses the same `limit` and `cursor` fields, sorted by `measured_at DESC, id DESC`. Each measurement includes `value_bytes`, source run, timestamp, and parsed `details` JSON. The API distinguishes Restic logical measurements from backend physical usage; the UI does not infer one from the other.
+Optional `measurement_type` filters one of `restic_restore_size`, `restic_raw_data`, `restic_total_size`, or `backend_physical_bytes`. `restic_total_size` is retained only for old stored data; new events must name the Restic mode and map it to `restic_restore_size` or `restic_raw_data`. Pagination uses the same `limit` and `cursor` fields, sorted by `measured_at DESC, id DESC`. Each measurement includes `value_bytes`, source run, Job, timestamp, `is_anomalous`, and parsed `details` JSON. Historical rows can have a null Job. The API distinguishes Restic logical measurements from backend physical usage; backend usage remains unmeasured without a backend-specific collector.
 
 ## Errors and access boundary
 
