@@ -193,6 +193,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@cfworker/json-schema':
+        specifier: 4.1.1
+        version: 4.1.1
       hono:
         specifier: 4.13.13
         version: 4.13.13
@@ -200,6 +203,9 @@ importers:
   packages/protocol: {}
 
 packages:
+
+  '@cfworker/json-schema@4.1.1':
+    resolution: {integrity: sha512-gAmrUZSGtKc3AiBL71iNWxDsyUC5uMaKKGdvzYsBoTW/xi42JQHl7eKV2OYzCUqvc+D2RCcf7EXY2iCyFIk6og==}
 
   '@cloudflare/kv-asset-handler@0.5.0':
     resolution: {integrity: sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg==}
@@ -1140,6 +1146,8 @@ packages:
     resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
 
 snapshots:
+
+  '@cfworker/json-schema@4.1.1': {}
 
   '@cloudflare/kv-asset-handler@0.5.0': {}
 

@@ -43,6 +43,7 @@ paths:
         '403': { description: Token is not authorized for this event scope }
         '409': { description: Event identifier reused with different content or conflicting completion }
         '413': { description: Request body exceeds the configured limit }
+        '415': { description: Content-Type must be application/json }
         '422': { description: Event does not satisfy the v1 contract }
         '429': { description: Rate limited; client may retry after Retry-After }
         '5XX': { description: Temporary service failure; client may retry the same event }

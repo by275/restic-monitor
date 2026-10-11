@@ -13,7 +13,7 @@
 
 **프로토콜과 로컬 기반 → 인증된 수집 API 및 D1 원자 처리 → Bash Reporter → 읽기 전용 대시보드 → 스케줄 감지 → 영속 알림 outbox → 저장소 통계와 이상 탐지 → 운영 호스트 적용.**
 
-1단계 승인 전까지 애플리케이션 구현과 백업 환경 변경은 진행하지 않는다.
+계획 검토 때는 애플리케이션 구현과 백업 환경 변경을 보류했다. 현재는 승인된 단계별 범위에 따라 구현한다.
 
 ## 설계서 검토
 
@@ -56,7 +56,7 @@ Worker Cron은 UTC 기준이다. `*/5 * * * *` 한 개의 Trigger가 여러 Job�
 4. 본문 시간은 RFC3339 UTC다. 서버는 별도로 `received_at`을 기록하고, 실행 시간·duration·시계 오차를 검증한다.
 5. `run.started`는 진행 중 표시용이다. `run.completed`에는 시작과 종료 시각을 모두 넣어 시작 이벤트 유실이나 도착 순서 역전을 복구한다.
 6. 클라이언트는 `status`를 보내지 않는다. 서버가 `operation`, 종료 코드, 스케줄러의 timeout 관찰을 바탕으로 상태를 계산한다. 알 수 없는 종료 코드는 실패로 처리한다.
-7. `metrics`는 operation별 허용 필드로 검증한다. 공통 필드는 별도 컬럼에 추출하고 추가 상세는 제한된 크기의 JSON으로 보관한다. Restic 원본 stdout/stderr 전체는 전송하지 않는다.
+7. `metrics`는 operation별 허용 필드로 검증한다. 알려진 공통 지표만 전용 컬럼에 저장하고 향후 확장 필드는 수집기에서 무시한다. Restic 원본 stdout/stderr 전체는 전송하지 않는다.
 8. 동일 `(token_id, event_id)`와 동일 payload hash는 중복 승인 응답을 돌려준다. 같은 ID에 다른 hash가 오면 `409 Conflict`다. 이벤트 기록과 run projection 갱신은 하나의 이벤트 단위로 원자 처리한다.
 9. 완료 상태는 늦게 도착한 `run.started`로 되돌아가지 않는다. 같은 run에 상충하는 두 개의 완료 결과가 오면 두 번째는 충돌로 응답한다.
 
@@ -164,7 +164,7 @@ v1의 숫자 지표는 JavaScript와 SQLite 경계에서 정확성을 보장하�
 - 종료 상태는 Restic 종료 코드와 operation으로 계산한다. 0은 success, backup/forget/forget_prune의 3은 partial_success, 130은 cancelled, 나머지 비영 코드는 failed다. `prune`의 코드 3은 partial success로 가정하지 않는다.
 - 시각은 UTC RFC3339로 받고 시작/종료 역전, duration 불일치(1초 허용), 이벤트 발생 시각과 해당 실행 경계의 불일치(1초 허용), 5분 넘는 미래 시각을 거부한다. 과거 이벤트는 spool 재전송을 위해 허용한다.
 - 오류 요약은 ANSI 제어 코드, URL, 명백한 POSIX/Windows 절대 경로 및 일반적인 secret assignment를 제거한 뒤 1,024자로 제한한다. 이 처리는 전체 로그 전송을 허용하지 않으며, Reporter도 원본 stdout/stderr를 보내지 않는다.
-- 수집 API는 요청별 rate limit과 Cloudflare 계정 사용량 경보를 운영 구성 항목으로 남긴다. Free 한도를 넘으면 D1 요청 자체가 실패할 수 있으므로 본문 크기 제한만으로 가용성을 보장하지 않는다.
+- 이번 단계에서는 Worker 내부 rate limit을 구현하지 않는다. 공개 배포 전에 Cloudflare edge rate limit과 계정 사용량 경보를 운영 설정으로 적용한다. Free 한도를 넘으면 D1 요청 자체가 실패할 수 있으므로 본문 크기 제한만으로 가용성을 보장하지 않는다.
 
 MVP Discord는 Webhook URL 하나를 Worker Secret에 저장하고 알림 설정 전체 CRUD는 뒤로 미룬다. 추후 여러 채널을 지원할 때 비밀 저장 방식과 채널 테이블을 별도로 설계한다.
 
@@ -255,7 +255,7 @@ MVP는 단계 1~6과 한 Host 파일럿까지다. 백업 실행 수집, 부분 �
 
 ## 구현 전에 다시 확인할 운영 결정
 
-아래는 1단계 이후 실제 백업 스크립트를 살펴볼 때 확정한다. 지금 설계/계획을 막는 질문은 아니다.
+아래는 백업 스크립트와 운영 구성을 살펴볼 때 확정한다. 지금 수집 API 구현을 막는 질문은 아니다.
 
 - 실제 Host 수, Restic 버전과 주로 쓰는 명령 조합
 - 각 Job의 cron 표현식, timezone, grace/timeout 값
