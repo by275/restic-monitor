@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "event_id": "019a9f34-8ac0-7a00-a001-123456789abc",
+  "run_id": "019a9f34-8ac0-7a00-a002-123456789abc",
+  "workflow_id": "019a9f34-8ac0-7a00-a003-123456789abc",
+  "event_type": "run.started",
+  "occurred_at": "2026-10-11T05:00:00Z",
+  "job_key": "docker-daily",
+  "repository_key": "repo-a",
+  "operation": "backup",
+  "client": {
+    "name": "restic-monitor-bash",
+    "version": "0.1.0",
+    "restic_version": "0.19.1"
+  }
+}

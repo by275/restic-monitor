@@ -60,6 +60,8 @@ Worker Cron은 UTC 기준이다. `*/5 * * * *` 한 개의 Trigger가 여러 Job�
 8. 동일 `(token_id, event_id)`와 동일 payload hash는 중복 승인 응답을 돌려준다. 같은 ID에 다른 hash가 오면 `409 Conflict`다. 이벤트 기록과 run projection 갱신은 하나의 이벤트 단위로 원자 처리한다.
 9. 완료 상태는 늦게 도착한 `run.started`로 되돌아가지 않는다. 같은 run에 상충하는 두 개의 완료 결과가 오면 두 번째는 충돌로 응답한다.
 
+v1의 숫자 지표는 JavaScript와 SQLite 경계에서 정확성을 보장하도록 0부터 `9007199254740991`까지로 제한한다. Restic의 uint64 출력이 이 범위를 넘으면 Reporter가 반올림해 보내지 말고 해당 지표를 알 수 없는 값으로 남긴다.
+
 ### 예시
 
 ```json
@@ -257,6 +259,9 @@ MVP는 단계 1~6과 한 Host 파일럿까지다. 백업 실행 수집, 부분 �
 
 - Restic [Scripting 및 JSON 출력 (stable 0.19.1)](https://restic.readthedocs.io/en/stable/075_scripting.html)
 - Restic [stats mode 의미](https://restic.readthedocs.io/en/stable/manual_rest.html)
+- Cloudflare [Workers Vitest integration](https://developers.cloudflare.com/workers/testing/vitest-integration/), [first test guide](https://developers.cloudflare.com/workers/testing/vitest-integration/write-your-first-test/), [test APIs](https://developers.cloudflare.com/workers/testing/vitest-integration/test-apis/)
+- Cloudflare [D1 Worker API](https://developers.cloudflare.com/d1/worker-api/d1-database/), [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/), [Wrangler D1 commands](https://developers.cloudflare.com/d1/wrangler-commands/)
+- Cloudflare [Worker TypeScript types](https://developers.cloudflare.com/workers/languages/typescript/#generate-types)
 - Cloudflare [Workers limits](https://developers.cloudflare.com/workers/platform/limits/)
 - Cloudflare [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/)
 - Cloudflare [Scheduled handler](https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/)

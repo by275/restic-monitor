@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "event_id": "019a9f34-8ac0-7a00-a004-123456789abc",
+  "run_id": "019a9f34-8ac0-7a00-a002-123456789abc",
+  "workflow_id": "019a9f34-8ac0-7a00-a003-123456789abc",
+  "event_type": "run.completed",
+  "occurred_at": "2026-10-11T05:08:22Z",
+  "job_key": "docker-daily",
+  "repository_key": "repo-a",
+  "operation": "backup",
+  "client": {
+    "name": "restic-monitor-bash",
+    "version": "0.1.0",
+    "restic_version": "0.19.1"
+  },
+  "result": {
+    "exit_code": 3,
+    "started_at": "2026-10-11T05:00:00Z",
+    "finished_at": "2026-10-11T05:08:22Z",
+    "duration_ms": 502000,
+    "error_summary": "Some source files could not be read",
+    "metrics": {
+      "bytes_processed": 536870912000,
+      "bytes_added": 251658240,
+      "bytes_added_packed": 184549376,
+      "files_new": 12,
+      "files_changed": 38,
+      "snapshot_id": "abcdef123456"
+    }
+  }
+}

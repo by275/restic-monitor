@@ -1,0 +1,56 @@
+openapi: 3.1.0
+info:
+  title: Restic Monitor API
+  version: 1.0.0
+  description: Versioned event ingestion contract. Runtime endpoint implementation starts in phase 2.
+servers:
+  - url: https://monitor.example.invalid
+paths:
+  /api/v1/ingest/events:
+    post:
+      operationId: ingestEvent
+      summary: Submit one idempotent run event
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventV1'
+            examples:
+              started:
+                summary: A run has started
+                externalValue: './examples/run.started.json'
+              completed:
+                summary: A run has completed
+                externalValue: './examples/run.completed.json'
+      responses:
+        '200':
+          description: Event accepted or previously accepted with the same payload hash
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [event_id, accepted, duplicate, received_at]
+                properties:
+                  event_id: { type: string }
+                  accepted: { type: boolean }
+                  duplicate: { type: boolean }
+                  received_at: { type: string, format: date-time }
+        '400': { description: Malformed JSON }
+        '401': { description: Missing or invalid bearer token }
+        '403': { description: Token is not authorized for this event scope }
+        '409': { description: Event identifier reused with different content or conflicting completion }
+        '413': { description: Request body exceeds the configured limit }
+        '422': { description: Event does not satisfy the v1 contract }
+        '429': { description: Rate limited; client may retry after Retry-After }
+        '5XX': { description: Temporary service failure; client may retry the same event }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    EventV1:
+      $ref: './schemas/event-v1.schema.json'

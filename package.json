@@ -1,0 +1,29 @@
+{
+  "name": "restic-monitor",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.11.2",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "db:migrate:local": "wrangler d1 migrations apply restic-monitor --local",
+    "types:generate": "wrangler types --include-runtime false",
+    "test": "vitest run --config vitest.protocol.config.ts && vitest run --config vitest.worker.config.ts",
+    "test:protocol": "vitest run --config vitest.protocol.config.ts",
+    "test:worker": "vitest run --config vitest.worker.config.ts",
+    "typecheck": "wrangler types --check --include-runtime false && tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.0",
+    "@cloudflare/workers-types": "5.20261006.1",
+    "@types/node": "^24.10.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "wrangler": "4.149.0"
+  }
+}
