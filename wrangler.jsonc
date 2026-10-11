@@ -9,6 +9,9 @@
   "vars": {
     "ADMIN_HOST": "localhost"
   },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   "d1_databases": [
     {
       "binding": "DB",

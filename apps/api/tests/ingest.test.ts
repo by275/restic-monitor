@@ -275,6 +275,56 @@ describe("event ingestion", () => {
     expect(await count("ingest_events", "run_id", start.run_id)).toBe(2);
   });
 
+  it("marks a run timed out at the configured boundary and resolves the alert on late completion", async () => {
+    const fixture = await seedFixture();
+    await env.DB.prepare("UPDATE jobs SET timeout_seconds = 10 WHERE id = ?")
+      .bind(fixture.jobId)
+      .run();
+
+    const startedAt = fixture.now - 30_000;
+    const start = startEvent(fixture, { occurred_at: new Date(startedAt).toISOString() });
+    expect((await sendEvent(start, fixture.token)).status).toBe(200);
+
+    const timeoutAt = startedAt + 10_000;
+    const worker = exports.default as typeof exports.default & {
+      scheduled(controller: ScheduledController, env: { DB: D1Database }, context: ExecutionContext): Promise<void>;
+    };
+    const scheduledEvent = { cron: "*/5 * * * *", scheduledTime: timeoutAt } as ScheduledController;
+    await worker.scheduled(scheduledEvent, env, {} as ExecutionContext);
+    await worker.scheduled(scheduledEvent, env, {} as ExecutionContext);
+    expect(
+      await env.DB.prepare("SELECT status, finished_at FROM runs WHERE id = ?")
+        .bind(start.run_id)
+        .first(),
+    ).toEqual({ status: "timed_out", finished_at: timeoutAt });
+    expect(
+      await env.DB.prepare("SELECT status FROM alerts WHERE run_id = ? AND rule_key = 'run_timeout'")
+        .bind(start.run_id)
+        .first(),
+    ).toEqual({ status: "open" });
+    expect(await count("alerts", "run_id", start.run_id)).toBe(1);
+
+    const completion = completedEvent(fixture, {
+      runId: start.run_id,
+      startedAt,
+      finishedAt: timeoutAt,
+    });
+    completion.workflow_id = start.workflow_id;
+    expect((await sendEvent(completion, fixture.token)).status).toBe(200);
+    expect(
+      await env.DB.prepare("SELECT status, finished_at FROM runs WHERE id = ?")
+        .bind(start.run_id)
+        .first(),
+    ).toEqual({ status: "success", finished_at: timeoutAt });
+    const resolvedAlert = await env.DB.prepare(
+      "SELECT status, resolved_at FROM alerts WHERE run_id = ? AND rule_key = 'run_timeout'",
+    )
+      .bind(start.run_id)
+      .first<{ status: string; resolved_at: number | null }>();
+    expect(resolvedAlert?.status).toBe("resolved");
+    expect(resolvedAlert?.resolved_at).toBeGreaterThan(timeoutAt);
+  });
+
   it("accepts the same event only once and rejects event ID reuse with different bytes", async () => {
     const fixture = await seedFixture();
     const event = completedEvent(fixture);

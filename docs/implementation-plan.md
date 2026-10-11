@@ -1,6 +1,6 @@
 # Restic Monitor 구현 계획 및 기술 검토
 
-- 상태: 검토 완료, 1~4단계 구현 승인됨
+- 상태: 1~5단계 구현 완료 및 검증됨. 다음은 6단계 Discord outbox이며 별도 승인이 필요하다.
 - 기준일: 2026-10-11
 - 설계 입력: [Restic Monitor 설계 대화](https://chatgpt.com/share/6acafa87-5670-83ee-8073-35f9da97447e)
 - 저장소 상태: 계획 작성 당시 작업 디렉터리에 기존 코드나 백업 환경 파일이 없었다. 실제 Docker/cron 스크립트는 구현 전 통합 단계에서 확인해야 한다.
@@ -221,11 +221,17 @@ Spool은 `pending/`, `quarantine/`, private `tmp/` 아래에 둔다. 각 이벤�
 
 ### 5단계 — missed schedule / timeout 엔진
 
-**작업:** IANA timezone 기준 발생 슬롯, catch-up, grace, 시작/종료 매칭, timeout, 경보 열기/해결을 구현한다. 5분 Worker Cron 한 개를 사용한다.
+**작업:** Worker `scheduled()` handler와 `*/5 * * * *` trigger를 추가했다. `job_schedule_state`는 Job별 schedule/timezone snapshot, catch-up cursor, 마지막 검사 시각을 저장한다. 검사 기준은 실제 Worker invocation의 `Date.now()`다. Cloudflare `controller.scheduledTime`은 예약 시각이므로 사용하지 않는다. 새 Worker를 처음 켜거나 schedule/timezone이 바뀐 경우 그 시각을 기준점으로 삼아 오래된 슬롯을 소급 생성하지 않는다. 정상 운영 중 Cron 지연은 cursor 이후부터 한 번에 최대 20개 슬롯씩 따라잡으며, 최대 20개 Job을 마지막 검사 시각 순으로 처리해 작업 수가 늘어도 다음 invocation에서 순환한다.
 
-**검증:** `scheduled()` 로컬 호출, 미실행/유예 전/후/late 시작/복구, Worker 스케줄 지연, 연속 여러 슬롯, DST 전환, 중복 Cron 호출, 실행이 timeout 직후 완료되는 경계.
+발생 슬롯 생성, 실행 매칭, 경보와 run 상태 갱신, cursor 전진은 Job별 D1 `batch()` 하나로 커밋한다. 매칭은 최신 미매칭 슬롯부터 시작 시각이 해당 슬롯 이후인 가장 이른 미사용 run을 연결한다. 한 run은 partial unique index로 한 슬롯에만 연결된다. ingest 요청에서 occurrence를 바로 찾지는 않으므로 run 시작/완료 이벤트와 누락 경보의 매칭·해결은 다음 scheduler 처리 때 반영된다. 정상 부하에서는 최대 5분 지연이며 Job/slot catch-up backlog가 있으면 더 늦을 수 있다. grace가 지난 pending 슬롯에는 `missed_schedule:<job>:<timestamp>` dedupe key 경보를 한 번 연다. 일치 run이 뒤늦게 관측되면 슬롯을 `matched`로 바꾸고 해당 누락 경보를 해결한다. 늦은 실행이 여러 missed slot을 건너뛴 경우 가장 최신의 해당 슬롯 하나만 매칭되며, 앞선 missed 슬롯은 과거 누락으로 남는다.
 
-**완료:** 같은 누락 슬롯에 경보가 중복 생성되지 않고, 지연 이벤트와 스케줄러 재호출에도 상태가 수렴한다.
+실행이 timeout 경계를 넘으면 `run_timeout:<run>` 경보를 한 번 열고 run을 `timed_out`으로 표시한다. 이때 `finished_at`과 `duration_ms`는 관측된 timeout deadline을 나타내며, 종료 이벤트가 오면 실제 종료 시각/결과로 덮어쓰고 경보를 해결한다. schedule parse 오류가 있어도 해당 Job의 timeout 검사와 다른 Job 처리는 계속한다. Worker 자체의 Cron 누락은 외부 heartbeat로 감지한다.
+
+5-field cron, IANA timezone 계산에는 Cloudflare Worker 런타임 호환성을 확인한 Croner 10.0.1을 사용한다. 분 단위 이상의 표준 cron 필드만 허용하며 초/year 확장과 Quartz 토큰은 받지 않는다. DST regression test는 New York의 봄 gap에서 `02:30` 슬롯이 로컬 `03:30`으로 이동하고, 가을 fold에서는 첫 `01:30`만 생성되는 동작을 고정했다. (라이브러리 README의 gap 설명과 직접 실행한 `nextRuns()` 결과가 일치하지 않아, 실제 설치 버전의 테스트 결과를 계약으로 기록했다.)
+
+**검증:** Worker 테스트에서 실제 `scheduled()` export를 호출해 grace 경계, 늦은 run 매칭/복구, 60개 연속 슬롯 catch-up, 중복 Cron 재호출, DST spring/fall 전환, 잘못된 schedule 중 timeout 검사, timeout deadline과 늦은 완료 이벤트를 확인한다.
+
+**완료:** 같은 누락 슬롯에 경보가 중복 생성되지 않고, 늦은 이벤트와 스케줄러 재호출 뒤에도 발생 슬롯·실행·경보가 일관된 최종 상태에 수렴한다.
 
 ### 6단계 — 영속 알림 outbox와 Discord
 

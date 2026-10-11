@@ -2,6 +2,7 @@ import { Validator, type Schema } from "@cfworker/json-schema";
 import { Hono, type Context } from "hono";
 import eventSchema from "../../../packages/protocol/schemas/event-v1.schema.json";
 import readApi from "./read";
+import { runScheduleTick } from "./scheduler";
 
 const app = new Hono<{ Bindings: Env }>();
 const eventValidator = new Validator(eventSchema as unknown as Schema, "2020-12");
@@ -333,6 +334,10 @@ app.post("/api/v1/ingest/events", async (context) => {
         resultMetrics?.snapshot_id ?? null,
         receivedAt,
       ),
+      context.env.DB.prepare(
+        `UPDATE alerts SET status = 'resolved', resolved_at = ?
+         WHERE rule_key = 'run_timeout' AND status = 'open' AND run_id = ?`,
+      ).bind(receivedAt, event.run_id),
     );
   }
 
@@ -365,7 +370,12 @@ app.post("/api/v1/ingest/events", async (context) => {
 
 app.notFound((context) => context.json({ error: "not_found" }, 404));
 
-export default app;
+export default {
+  fetch: (request: Request, env: Env, context: ExecutionContext) => app.fetch(request, env, context),
+  scheduled: async (_controller: ScheduledController, env: Env, _context: ExecutionContext) => {
+    await runScheduleTick(env.DB, Date.now());
+  },
+};
 
 async function authenticate(
   authorizationHeader: string | undefined,
