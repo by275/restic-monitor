@@ -140,7 +140,8 @@ Worker Cron은 UTC 기준이다. `*/5 * * * *` 한 개의 Trigger가 여러 Job�
 | `jobs` | Host별 작업, `UNIQUE(host_id, name)`, cron 표현식, IANA timezone, grace/timeout, 활성 여부 |
 | `job_repositories` | Job과 Repository 허용 연결, 역할, 복합 PK |
 | `api_tokens` | token public id/prefix, Host FK, SHA-256 digest, scope, 만료/폐기/마지막 사용 시각. 원문 토큰 미저장 |
-| `runs` | run id, job/repository FK, workflow id, operation, 상태 CHECK, exit code, 시작/종료/duration, 클라이언트·Restic 버전, 제한된 오류 요약. Terminal 상태는 오래된 시작 이벤트가 덮지 못하게 함 |
+| `runs` | run id, job FK, workflow id, operation, 상태 CHECK, exit code, 시작/종료/duration, 클라이언트·Restic 버전, 제한된 오류 요약. Repository 연결은 별도 테이블에 두며 Terminal 상태는 오래된 시작 이벤트가 덮지 못하게 함 |
+| `run_repositories` | 실행과 Repository의 연결. 일반 작업은 `repository` 역할 하나를, copy는 `source`와 `target` 역할을 저장하며 `(run_id, repository_id, role)`을 유일하게 둠 |
 | `run_metrics` | run당 operation별 공통 지표와 `metrics_json`. 크기 제한과 operation별 스키마 검증 |
 | `ingest_events` | `PRIMARY KEY(token_id, event_id)`, run/event type, payload hash, server receive time. 이벤트 유효 기간 및 보존 정책 |
 | `repository_stats` | Repository 전체 측정 시계열. `measurement_type`을 저장해 restore-size, Restic raw-data, 실제 backend 용량을 구별 |
@@ -150,7 +151,7 @@ Worker Cron은 UTC 기준이다. `*/5 * * * *` 한 개의 Trigger가 여러 Job�
 
 시간 비교와 정렬에 쓰는 모든 D1 시각(`occurred_at` 원본 외)은 Unix epoch milliseconds 정수로 저장한다. API는 RFC3339 UTC를 받는다. SQLite `CURRENT_TIMESTAMP`의 문자열 형식과 혼용하지 않도록 Worker가 `Date.now()`를 명시적으로 전달한다.
 
-필수 인덱스는 `runs(job_id, started_at DESC)`, `runs(repository_id, finished_at DESC)`, `runs(status, started_at)`, `repository_stats(repository_id, measured_at DESC)`, `schedule_occurrences(state, scheduled_for)`, `alerts(status, opened_at DESC)`, `notification_deliveries(status, next_attempt_at)`다. 이벤트 처리의 D1 batch는 개별 이벤트의 원자 경계로 사용한다. D1 batch 실패 시 해당 batch 전체가 롤백될 수 있으므로 여러 클라이언트 이벤트를 한 transaction으로 묶어 일부 이벤트까지 실패시키지 않는다.
+`runs`에는 단일 `repository_id`를 두지 않는다. 실행 하나가 source와 target 두 저장소를 참조할 수 있기 때문이다. Repository별 실행 이력 인덱스는 `run_repositories(repository_id, run_id)`와 `runs(job_id, started_at DESC)`, `runs(status, started_at)` 조합으로 조회한다. 나머지 필수 인덱스는 `repository_stats(repository_id, measured_at DESC)`, `schedule_occurrences(state, scheduled_for)`, `alerts(status, opened_at DESC)`, `notification_deliveries(status, next_attempt_at)`다. 이벤트 처리의 D1 batch는 개별 이벤트의 원자 경계로 사용한다. D1 batch 실패 시 해당 batch 전체가 롤백될 수 있으므로 여러 클라이언트 이벤트를 한 transaction으로 묶어 일부 이벤트까지 실패시키지 않는다.
 
 MVP Discord는 Webhook URL 하나를 Worker Secret에 저장하고 알림 설정 전체 CRUD는 뒤로 미룬다. 추후 여러 채널을 지원할 때 비밀 저장 방식과 채널 테이블을 별도로 설계한다.
 
