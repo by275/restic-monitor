@@ -1,6 +1,6 @@
 # Restic Monitor
 
-Restic Monitor is a Cloudflare Worker, D1 database, and web UI for registering backup Jobs, receiving start/completion pings, detecting missed schedules and timeouts, and sending selected alerts to Discord.
+Restic Monitor is a Cloudflare Worker, D1 database, and web UI for registering backup Jobs, receiving start/completion pings, detecting missed schedules and timeouts, and sending selected alerts to Discord or Telegram.
 
 The client side is intentionally small. A Job gets a private ping URL in the UI. The machine that already runs Restic generates one UUID for each command, POSTs a start ping, runs Restic, then POSTs the exit code and optional parsed summary using the same UUID. Linux Bash and Windows PowerShell examples are in [`examples/`](examples/). Your existing scheduler remains responsible for running Restic; add the example calls to the command or script that already runs it.
 
@@ -20,7 +20,7 @@ Open `http://localhost:8787/healthz`. The local dashboard and admin API share `A
 
 ## Job and client model
 
-- A Job represents one independently scheduled command with one operation, repository association, schedule policy, timeout, tags, and Discord preference.
+- A Job represents one independently scheduled command with one operation, repository association, schedule policy, timeout, tags, and zero or more notification targets.
 - Register backup and prune as separate Jobs when their schedules or results are independent. Add multiple cron rules to one Job only when all invocations have the same reporting meaning.
 - The UI generates a random per-Job capability token. D1 stores its SHA-256 hash. Rotating it immediately revokes the previous URL.
 - The client creates a `run_id` UUID for each invocation and reuses it on both pings and retries. It does not send Job name, slug, operation, repository, client timestamp, or duration.
@@ -29,7 +29,7 @@ Read the [client protocol v1](docs/client-protocol.md), [dashboard read API](doc
 
 ## Alerts and deployment
 
-Each Job has its own optional Discord webhook URL. Enter it in the Job form; on edit, leave the field blank to keep the current URL, enter a new URL to replace it, or select the removal checkbox. The dashboard shows whether a URL is configured but does not return its current value in the Job list API. Alerts remain pending until that Job has a webhook and Discord notifications are enabled.
+Register Discord webhooks or Telegram Bot API destinations in Settings, then select any number of them for each Job. A Job with no selected destinations sends no notifications. Target credentials are stored in D1 and are never returned by the list APIs; leaving credential fields blank while editing keeps the existing values. Disable a target to stop new alert deliveries and pause queued sends. Unassign a target from all Jobs before deleting it.
 
 For deployment, protect the dashboard hostname with Cloudflare Access and set `ADMIN_HOST` to that hostname. Set `PING_BASE_URL` to a separate public hostname such as `https://ingest.example.com`; the generated URL must not point at the Access-protected dashboard host. The public ping routes authenticate with each Job's capability URL. See [Cloudflare Access and hostname setup](docs/cloudflare-access.md).
 
@@ -48,7 +48,7 @@ Tests use isolated D1 databases and synthetic Restic output. The Bash example te
 
 ## Project boundaries
 
-- Server configuration, ping API v1, schedules, D1, status UI, and Discord alert delivery belong here.
+- Server configuration, ping API v1, schedules, D1, status UI, and notification delivery belong here.
 - Reporter implementations, host-specific service installation, Docker composition, and real repository testing belong to the client/operator environment.
 - Do not modify the sibling `docker-restic` repository as part of this project.
 

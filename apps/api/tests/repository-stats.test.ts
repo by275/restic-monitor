@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
 import { prepareRepositoryStatsStatements } from "../src/repository-stats";
 
-let fixture: { hostId: string; repositoryId: string; jobId: string } | null = null;
+let fixture: { hostId: string; repositoryId: string; jobId: string; targetId: string } | null = null;
 
 afterEach(async () => {
   if (fixture === null) return;
@@ -19,6 +19,7 @@ afterEach(async () => {
   await env.DB.prepare("DELETE FROM jobs WHERE id = ?").bind(fixture.jobId).run();
   await env.DB.prepare("DELETE FROM repositories WHERE id = ?").bind(fixture.repositoryId).run();
   await env.DB.prepare("DELETE FROM hosts WHERE id = ?").bind(fixture.hostId).run();
+  await env.DB.prepare("DELETE FROM notification_targets WHERE id = ?").bind(fixture.targetId).run();
   fixture = null;
 });
 
@@ -27,9 +28,10 @@ describe("Repository stats growth alerts", () => {
     const hostId = crypto.randomUUID();
     const repositoryId = crypto.randomUUID();
     const jobId = crypto.randomUUID();
+    const targetId = crypto.randomUUID();
     const suffix = hostId.replaceAll("-", "").slice(0, 10);
     const now = Date.now();
-    fixture = { hostId, repositoryId, jobId };
+    fixture = { hostId, repositoryId, jobId, targetId };
     await env.DB.prepare(
       "INSERT INTO hosts (id, name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
     ).bind(hostId, `stats-host-${suffix}`, "Stats test host", now, now).run();
@@ -41,6 +43,13 @@ describe("Repository stats growth alerts", () => {
       `INSERT INTO jobs (id, host_id, slug, name, operation, max_runtime_seconds, created_at, updated_at)
        VALUES (?, ?, ?, 'Repository stats', 'stats', 3600, ?, ?)`,
     ).bind(jobId, hostId, `stats-${suffix}`, now, now).run();
+    await env.DB.prepare(
+      `INSERT INTO notification_targets (id, name, provider, config_json, created_at, updated_at)
+       VALUES (?, ?, 'discord', ?, ?, ?)`,
+    ).bind(targetId, `stats-target-${suffix}`, JSON.stringify({ webhook_url: "https://discord.com/api/webhooks/123456789012345678/test-token" }), now, now).run();
+    await env.DB.prepare(
+      "INSERT INTO job_notification_targets (job_id, target_id, created_at) VALUES (?, ?, ?)",
+    ).bind(jobId, targetId, now).run();
     await env.DB.prepare(
       "INSERT INTO job_repositories (job_id, repository_id, role) VALUES (?, ?, 'repository')",
     ).bind(jobId, repositoryId).run();

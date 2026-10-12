@@ -1,9 +1,9 @@
 # Restic Monitor implementation plan
 
-- Status: original stages 1–7 implemented; follow-up Stage 8 (Host/Repository management) implemented and locally verified; Stages 9–11 are next
+- Status: Stages 1–9 implemented; Stages 10–11 remain
 - API path version: v1 (no release or deployed client requires a protocol migration)
 - Database baseline: resettable development database; no existing-data backfill or compatibility migration is required
-- Scope: server-side Job configuration, ping API, schedule monitoring, per-Job Discord alerts, dashboard, and small Bash/PowerShell examples
+- Scope: server-side Job configuration, ping API, schedule monitoring, reusable Discord/Telegram notification targets, dashboard, and small Bash/PowerShell examples
 - Out of scope: a required Reporter product, modifying an existing Docker/cron host, or editing the sibling `docker-restic` repository
 
 ## Current implementation status
@@ -13,16 +13,16 @@
 | 1. v1 protocol and clean D1 baseline | Complete | JSON Schema and isolated D1 constraints; this project's local D1 was reset and the single baseline applied |
 | 2. Host/Repository/Job API | Complete | Create, edit, disable, validation, immutable Host association, unique slug, and one-time token tests |
 | 3. Start/completion ping API | Complete | Idempotency, conflicting retries, body validation, exit-code mapping, missing-start behavior, token revocation, and synthetic metrics |
-| 4. Schedule and alerts | Complete | Multiple cron rules, grace boundaries, catch-up, DST, timeout, recovery, Discord preference, and outbox retry tests |
+| 4. Schedule and alerts | Complete | Multiple cron rules, grace boundaries, catch-up, DST, timeout, recovery, notification routing, and outbox retry tests |
 | 5. Management/status UI | Complete | Static JavaScript check plus local browser smoke for Host/Repository/Job create, one-time URL display, and Job edit |
 | 6. Client examples and scope cleanup | Complete | Bash example with fake Restic/curl and synthetic fixtures; PowerShell runtime is unavailable in this Linux environment |
 | 7. Per-Job Discord webhook configuration | Complete | Admin API and UI replace/remove each Job URL; outbox routes to the owning Job's URL; D1/API/outbox tests |
 | 8. Host/Repository edit, availability, and deletion controls | Complete | D1/API tests and browser smoke for registration, edit, hide/restore, and unused-resource deletion |
-| 9. Reusable Discord/Telegram notification targets | Planned | Generic target registry, Job assignments, provider adapters, target-specific outbox tests |
+| 9. Reusable Discord/Telegram notification targets | Complete | D1/API/outbox coverage for both providers; secret-safe responses; browser smoke for target registration and Job assignment/edit |
 | 10. SFPanel-inspired dashboard and admin UI refresh | Planned | Restic Monitor-specific design and browser smoke; no direct SFPanel source reuse |
 | 11. `DEPLOY_*` Wrangler customization | Planned | Synthetic config generation tests and deployment guide |
 
-`corepack pnpm test` and `corepack pnpm typecheck` pass: 13 protocol tests, 29 Worker/D1 tests, the synthetic Bash client test, and static JavaScript validation. The local dashboard browser smoke covered Host/Repository/Job creation, one-time URL display, Job edit, and per-Job webhook status. Cloudflare Access policy, production D1, deployed hostname routing, and edge rate limiting are operator configuration and have not been deployed or verified here. Timeout and missed-schedule detection run on the Worker Cron every five minutes, so alert detection can lag the configured boundary by up to one Cron interval.
+`corepack pnpm test` and `corepack pnpm typecheck` pass: 13 protocol tests, 33 Worker/D1 tests, the synthetic Bash client test, and static JavaScript validation. Stage 9 browser smoke covered Discord and Telegram target registration, credential-free list responses, Job assignment and removal, and target options in the Job editor. Cloudflare Access policy, production D1, deployed hostname routing, and edge rate limiting are operator configuration and have not been deployed or verified here. Timeout and missed-schedule detection run on the Worker Cron every five minutes, so alert detection can lag the configured boundary by up to one Cron interval.
 
 ## Product model
 
@@ -53,7 +53,9 @@ Initial schedule support is standard five-field cron with an IANA timezone. The 
 
 Start grace is the wait after a scheduled occurrence for a start ping. Maximum runtime is separate and starts when the server receives the start ping. This prevents a short late-start allowance from incorrectly timing out a long Restic run. Both values are configured on the server.
 
-Job registration includes Discord enablement and an optional Discord webhook URL per Job. The URL is stored on the Job in D1; the admin form can replace or remove it, and list responses expose only a configured flag. Per-job preferences determine which alerts enter the notification outbox, and the outbox sends each delivery to its Job's URL. Existing exit-code reporting, schedule-missed/timeout detection, repository-stats growth alerts, deduplication, and notification retry behavior are retained.
+Discord and Telegram destinations are registered once as notification targets. Discord stores a webhook URL; Telegram stores a Bot API token and chat ID. A Job selects zero or more targets, with zero meaning no notifications. Target lists and Job configuration expose destination names, provider, enabled state, and usage, but never provider credentials. An update can rename, enable, or disable a target and can replace credentials; omitting credentials preserves the current value. Provider type stays fixed for a target's lifetime. A target can be deleted only after Jobs stop referencing it; deletion ends its pending deliveries while retaining delivery history.
+
+When an alert opens, the outbox records a snapshot for each selected target. Recovery notices use those original target IDs and are queued only while each target still exists and is enabled, even if the Job's selection has since changed. Disabled targets pause both new delivery creation and pending sends. Existing exit-code reporting, schedule-missed/timeout detection, repository-stats growth alerts, deduplication, and shared delivery retries are retained.
 
 ## Fresh D1 data model
 
@@ -62,26 +64,27 @@ The local D1 can be deleted and recreated during this pre-release redesign. Keep
 | Table | Purpose |
 |---|---|
 | `hosts`, `repositories` | Admin-managed inventory |
-| `jobs` | Name, description, slug, operation, host, timeout, enabled, Discord preference and optional webhook URL |
+| `jobs` | Name, description, slug, operation, host, timeout, and enabled state |
 | `job_tags` | Job labels |
 | `job_repositories` | Configured repository roles for a Job |
+| `notification_targets`, `job_notification_targets` | Reusable provider connections and Job assignments |
 | `job_ping_tokens` | Hash-only, revocable per-Job ping capabilities |
 | `job_schedule_rules`, `job_schedule_state`, `schedule_occurrences` | Typed schedule definitions and missed-run tracking |
 | `runs`, `run_repositories`, `run_metrics` | Server-timestamped execution history and optional measurements |
 | `repository_stats` | Job/repository-specific Restic measurements and anomaly state |
-| `alerts`, `notification_deliveries` | Deduplicated alerts and durable Discord outbox |
+| `alerts`, `notification_deliveries` | Deduplicated alerts and provider-aware durable delivery outbox with recipient snapshots |
 
 ## Implementation stages and acceptance tests
 
 ### Stage 1 — Contract and fresh schema
 
-Replace the event envelope schema with the v1 start/completion route contract, OpenAPI, curl examples, and synthetic payload fixtures. Create a consolidated clean D1 schema reflecting Jobs, schedule rules, ping capabilities, runs, alerts, and Discord preferences. Remove old event-id/token tables and reset only this project's local Wrangler D1 state.
+Replace the event envelope schema with the v1 start/completion route contract, OpenAPI, curl examples, and synthetic payload fixtures. Create a consolidated clean D1 schema reflecting Jobs, schedule rules, ping capabilities, runs, alerts, and notification targets. Remove old event-id/token tables and reset only this project's local Wrangler D1 state.
 
 **Tests:** contract validation for valid/invalid completion bodies, missing/invalid IDs, unknown metrics, unsafe integers, and body size; D1 constraint tests for unique slugs, token hashes, Job associations, schedule rules, and run completion state.
 
 ### Stage 2 — Admin configuration API
 
-Add Access-host-protected Host/Repository listing and registration plus Job create/update/disable, tags, repository associations, cron rules, Discord preference, and ping-token rotation. Generate a ping URL only on Job creation/token rotation. Validate cron/timezone/operation/server references before saving. Job Host is immutable after creation so existing run history cannot be reassigned.
+Add Access-host-protected Host/Repository listing and registration plus Job create/update/disable, tags, repository associations, cron rules, notification target assignments, and ping-token rotation. Generate a ping URL only on Job creation/token rotation. Validate cron/timezone/operation/server references before saving. Job Host is immutable after creation so existing run history cannot be reassigned.
 
 **Tests:** create/update/disable Job, duplicate slug, invalid association, schedule and timezone errors, one-time token return/hash-only storage/rotation, and rejection from a non-admin hostname.
 
@@ -93,13 +96,13 @@ Implement POST-only start/completion endpoints. Resolve the ping token to one en
 
 ### Stage 4 — Schedule engine and alert routing
 
-Adapt missed-start and runtime-timeout processing to multiple cron rules. Apply each rule's timezone and start grace, retain catch-up/DST behavior, and only queue Discord notifications for Jobs that enable Discord. Keep the existing repository growth anomaly rule.
+Adapt missed-start and runtime-timeout processing to multiple cron rules. Apply each rule's timezone and start grace, retain catch-up/DST behavior, and queue configured notifications for alerts. Keep the existing repository growth anomaly rule.
 
-**Tests:** grace boundaries, two cron rules on one Job, same-time occurrence dedupe, DST transitions, Worker catch-up, missing start, timeout, late completion recovery, Repository growth alert/recovery, disabled Discord delivery, webhook retry and recovery notices.
+**Tests:** grace boundaries, two cron rules on one Job, same-time occurrence dedupe, DST transitions, Worker catch-up, missing start, timeout, late completion recovery, Repository growth alert/recovery, disabled notification delivery, provider retry and recovery notices.
 
 ### Stage 5 — Management and status UI
 
-Add Host/Repository registration and Job registration/editing, schedule/tag/association/notification controls, one-time ping URL display and rotation, and Job status/history views. Keep the run and repository measurements dashboard.
+Add Host/Repository and notification target registration plus Job registration/editing, schedule/tag/association/notification controls, one-time ping URL display and rotation, and Job status/history views. Keep the run and repository measurements dashboard.
 
 **Tests:** Admin API flows for create/edit/disable and token rotation; static JavaScript syntax; local browser smoke for Host/Repository/Job create, one-time URL display, Job edit, and empty dashboard state.
 
@@ -127,11 +130,11 @@ Add Host and Repository edit and availability controls to the existing Settings 
 
 ### Stage 9 — Reusable notification targets
 
-Replace `jobs.discord_enabled` and `jobs.discord_webhook_url` with a reusable notification target registry and a Job-to-target association. Each target has a UUID, display name, provider type (`discord` or `telegram`), provider configuration, and availability. Discord uses a webhook URL; Telegram uses a bot token and chat ID. A Job can select zero or more targets; no selection creates no notification deliveries. Keep credentials out of list responses and support explicit replace, preserve, and removal behavior. Use provider adapters for message formatting and delivery while retaining shared retry and delivery status handling. Record recipients for each opened alert so recovery notices go to the same targets. Use target-scoped outbox uniqueness to prevent duplicate sends.
+Replace `jobs.discord_enabled` and `jobs.discord_webhook_url` with a reusable notification target registry and a Job-to-target association. Each target has a UUID, display name, provider type (`discord` or `telegram`), provider configuration, and availability. Discord uses a webhook URL; Telegram uses a bot token and chat ID. A Job can select zero or more targets; no selection creates no notification deliveries. Keep credentials out of list responses and Job responses. Target edits preserve omitted credentials and replace credentials only when a complete new provider configuration is supplied. Provider type is immutable. Unassigned targets can be deleted; pending deliveries for a deleted target are ended with a sanitized reason. Use provider adapters for message formatting and delivery while retaining shared retry and delivery status handling. Record recipients for each opened alert so recovery notices go to the same active targets. Use target-scoped outbox uniqueness to prevent duplicate sends.
 
 Since there is no production data to preserve, replace the initial schema and verify it against a clean D1 rather than adding backfill compatibility for per-Job Discord URLs.
 
-**Tests:** Discord and Telegram configuration validation, secret-safe responses, create/update/remove/availability behavior, zero-target suppression, multiple Job targets, recipient-stable recovery, outbox deduplication, provider failures/retries, and synthetic sends. Verify Telegram request format against the official Bot API documentation during implementation.
+**Tests:** Discord and Telegram configuration validation, secret-safe responses, create/update/delete/availability behavior, zero-target suppression, multiple Job targets, recipient-stable recovery, outbox deduplication, provider failures/retries, and synthetic sends. The Telegram Bot API `sendMessage` endpoint and `ResponseParameters.retry_after` format were checked against [Telegram's official Bot API documentation](https://core.telegram.org/bots/api).
 
 ### Stage 10 — SFPanel-inspired interface refresh
 
@@ -153,4 +156,4 @@ Restic may emit structured fatal-error JSON on stderr, while runtime/argument fa
 
 ## Deployment boundary
 
-Local Vitest/Wrangler D1 tests do not deploy anything. Production setup remains opt-in: create a new D1 database from the clean schema, configure the Worker and dashboard Access policy, register per-Job Discord webhook URLs in the UI, and install each generated ping URL in an existing scheduler. Never edit the sibling `docker-restic` repository as part of this project.
+Local Vitest/Wrangler D1 tests do not deploy anything. Production setup remains opt-in: create a new D1 database from the clean schema, configure the Worker and dashboard Access policy, register notification targets and assign them to Jobs in the UI, and install each generated ping URL in an existing scheduler. Never edit the sibling `docker-restic` repository as part of this project.

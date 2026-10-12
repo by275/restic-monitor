@@ -23,8 +23,11 @@
 - Job은 독립된 명령, 일정, 결과 및 알림 단위다. backup과 prune처럼 독립 실행되는 작업은 별도 Job으로 구성한다.
 - 같은 작업의 여러 cron 규칙은 한 Job에 연결할 수 있다. 일정 종류 모델은 확장 가능하게 두되 초기 구현은 표준 5-field cron과 IANA timezone만 평가한다.
 - 시작 지연 유예와 최대 실행 시간은 별도 설정한다.
-- Worker Cron은 Restic을 실행하지 않는다. 예정 실행 누락, 실행 timeout, Discord outbox 재시도를 처리한다.
-- Discord webhook URL은 각 Job에 선택적으로 저장한다. Job 수정에서 빈 값은 기존 URL 유지, 새 URL은 교체, 삭제 체크는 URL 제거를 의미한다. API 목록 응답은 URL 원문 대신 설정 여부만 반환한다.
+- Worker Cron은 Restic을 실행하지 않는다. 예정 실행 누락, 실행 timeout, 알림 outbox 재시도를 처리한다.
+- Discord·Telegram 알림 연결은 별도 notification target으로 등록하고 Job에서 0개 이상 선택한다. 선택이 없으면 알림을 만들지 않는다.
+- 알림 자격 증명은 D1에 저장하지만 API 목록과 Job 응답으로 돌려주지 않는다. 대상 수정에서 연결 정보 입력을 생략하면 기존 값을 유지한다. 대상 provider는 생성 후 바꿀 수 없다.
+- 비활성 알림 대상은 새 알림 생성과 대기 중 전송을 멈춘다. Job에서 참조 중인 대상은 삭제할 수 없고, 참조 해제 뒤 삭제하면 해당 대상의 대기 중 전송을 종료한다.
+- 열린 알림의 대상별 전송 이력을 저장해 회복 알림은 당시 선택된 활성 대상에 전달한다. 이후 Job의 대상을 변경해도 열린 알림의 수신 대상은 바뀌지 않는다.
 - 기존 exit code 상태 매핑과 Repository stats 이상 감지를 유지한다. backend 물리 사용량을 Restic 통계로 추정하지 않는다.
 
 ## 검증과 변경

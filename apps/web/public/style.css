@@ -173,6 +173,20 @@ tbody tr:hover { background: rgba(86, 148, 220, .045); }
 .repository-fields label { min-width: 0; }
 .check-field { display: flex !important; grid-auto-flow: column; justify-content: start; align-items: center; gap: 8px !important; }
 .check-field input { accent-color: var(--blue); }
+.notification-selection { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.notification-selection legend { padding: 0 5px; color: var(--muted); font-size: 10px; }
+.notification-selection small { display: block; margin-top: 8px; color: #7f93ad; font-size: 9px; }
+.notification-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.notification-option { display: inline-flex !important; grid-auto-flow: column; align-items: center; gap: 7px !important; padding: 7px 9px; border: 1px solid rgba(141, 161, 189, .15); border-radius: 7px; background: rgba(255, 255, 255, .025); }
+.notification-option input { accent-color: var(--blue); }
+.notification-option span { color: var(--text); font-size: 10px; }
+.admin-resource-form { margin: 12px 0; padding: 13px; }
+.admin-resource-form .admin-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.admin-resource-form .wide-field { grid-column: span 2; }
+.admin-resource-form #telegram-target-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.admin-resource-form #telegram-target-fields[hidden] { display: none; }
+.field-help { margin: 0; color: #7f93ad; font-size: 9px; }
+.form-actions { display: flex; align-items: center; gap: 8px; }
 .button-primary { justify-self: start; color: #071522; background: linear-gradient(135deg, #8bcaff, #58a4f5); }
 .button-primary:hover { background: #a1d5ff; }
 .admin-job-list { display: grid; gap: 8px; }
@@ -215,6 +229,9 @@ tbody tr:hover { background: rgba(86, 148, 220, .045); }
   .detail-grid { grid-template-columns: 1fr; }
   .admin-forms, .admin-resource-lists, .admin-fields { grid-template-columns: 1fr; }
   .wide-field, .repository-fields { grid-column: auto; }
+  .admin-resource-form .admin-fields { grid-template-columns: 1fr; }
+  .admin-resource-form .wide-field { grid-column: auto; }
+  .admin-resource-form #telegram-target-fields { grid-template-columns: 1fr; }
   .repository-fields { grid-template-columns: 1fr; }
   .admin-content { padding: 13px; }
   .admin-job-row { align-items: start; flex-direction: column; }

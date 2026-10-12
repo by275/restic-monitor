@@ -1,5 +1,5 @@
 import { env, exports } from "cloudflare:workers";
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createPingToken, sha256Hex } from "../src/security";
 
 interface Fixture {
@@ -9,7 +9,7 @@ interface Fixture {
   token: string;
 }
 
-async function createFixture(operation: string = "backup", discordEnabled = false): Promise<Fixture> {
+async function createFixture(operation: string = "backup", withNotificationTarget = false): Promise<Fixture> {
   const hostId = crypto.randomUUID();
   const repositoryId = crypto.randomUUID();
   const jobId = crypto.randomUUID();
@@ -23,9 +23,21 @@ async function createFixture(operation: string = "backup", discordEnabled = fals
   ).bind(repositoryId, `repo-${repositoryId.slice(0, 8)}`, "Ping test repository", now, now).run();
   await env.DB.prepare(
     `INSERT INTO jobs (
-       id, host_id, slug, name, operation, max_runtime_seconds, discord_enabled, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, 7200, ?, ?, ?)`,
-  ).bind(jobId, hostId, `job-${jobId.slice(0, 8)}`, "Ping test job", operation, discordEnabled ? 1 : 0, now, now).run();
+       id, host_id, slug, name, operation, max_runtime_seconds, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, 7200, ?, ?)`,
+  ).bind(jobId, hostId, `job-${jobId.slice(0, 8)}`, "Ping test job", operation, now, now).run();
+  if (withNotificationTarget) {
+    const targetId = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO notification_targets (id, name, provider, config_json, created_at, updated_at)
+       VALUES (?, ?, 'discord', ?, ?, ?)`,
+    ).bind(targetId, `ping-target-${targetId.slice(0, 8)}`, JSON.stringify({
+      webhook_url: "https://discord.com/api/webhooks/123456789012345678/test-token",
+    }), now, now).run();
+    await env.DB.prepare(
+      "INSERT INTO job_notification_targets (job_id, target_id, created_at) VALUES (?, ?, ?)",
+    ).bind(jobId, targetId, now).run();
+  }
   const role = operation === "copy" ? "target" : "repository";
   await env.DB.prepare(
     "INSERT INTO job_repositories (job_id, repository_id, role) VALUES (?, ?, ?)",
@@ -114,7 +126,7 @@ describe("Job ping API v1", () => {
       .bind(runId).first()).toEqual({ bytes_added: 135926784, snapshot_id: "4e066584" });
   });
 
-  it("maps partial and failed results to run alerts and respects per-Job Discord settings", async () => {
+  it("maps partial and failed results to alerts routed to selected notification targets", async () => {
     const fixture = await createFixture("backup", true);
     const partialRunId = crypto.randomUUID();
     await start(fixture, partialRunId);
@@ -144,7 +156,7 @@ describe("Job ping API v1", () => {
     expect(failed?.error_summary).not.toContain("restic-secret");
     expect(failed?.error_summary).not.toContain(fixture.token);
 
-    const quietFixture = await createFixture("backup", false);
+    const quietFixture = await createFixture();
     const quietRunId = crypto.randomUUID();
     await start(quietFixture, quietRunId);
     await complete(quietFixture, quietRunId, { exit_code: 1 });
@@ -154,7 +166,7 @@ describe("Job ping API v1", () => {
   });
 
   it("maps cancellation separately and treats unrecognized non-zero exit codes as failures", async () => {
-    const fixture = await createFixture("backup", false);
+    const fixture = await createFixture();
     const cancelledRunId = crypto.randomUUID();
     await start(fixture, cancelledRunId);
     await expect((await complete(fixture, cancelledRunId, { exit_code: 130 })).json())

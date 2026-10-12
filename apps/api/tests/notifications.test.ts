@@ -11,8 +11,12 @@ import { runScheduleTick } from "../src/scheduler";
 const minute = 60_000;
 const now = Date.UTC(2025, 0, 1, 0, 0, 0);
 const webhook = "https://discord.com/api/webhooks/123456789012345678/test-webhook-token";
+const telegramToken = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
 
 interface DeliveryState {
+  target_id: string;
+  provider: string;
+  target_name: string;
   status: string;
   attempts: number;
   next_attempt_at: number;
@@ -22,11 +26,29 @@ interface DeliveryState {
   notification_type: string;
 }
 
+interface TargetFixture {
+  id: string;
+  provider: "discord" | "telegram";
+  config: Record<string, string>;
+}
+
+async function createTarget(
+  provider: TargetFixture["provider"] = "discord",
+  config: Record<string, string> = { webhook_url: webhook },
+  labelPrefix = "notify-target",
+): Promise<TargetFixture> {
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO notification_targets (id, name, provider, config_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).bind(id, `${labelPrefix}-${id.slice(0, 8)}`, provider, JSON.stringify(config), now, now).run();
+  return { id, provider, config };
+}
+
 async function seedAlert(
   message = "Backup did not finish",
-  discordEnabled = true,
-  webhookUrl: string | null = webhook,
-): Promise<{ hostId: string; jobId: string; alertId: string }> {
+  targets: TargetFixture[] | null = null,
+): Promise<{ hostId: string; jobId: string; alertId: string; targets: TargetFixture[] }> {
   const hostId = crypto.randomUUID();
   const jobId = crypto.randomUUID();
   const alertId = crypto.randomUUID();
@@ -34,11 +56,15 @@ async function seedAlert(
     "INSERT INTO hosts (id, name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
   ).bind(hostId, `notify-host-${hostId.slice(0, 8)}`, "Notify Host", now, now).run();
   await env.DB.prepare(
-    `INSERT INTO jobs (
-       id, host_id, slug, name, operation, max_runtime_seconds, discord_enabled,
-       discord_webhook_url, created_at, updated_at
-     ) VALUES (?, ?, ?, 'Nightly Backup', 'backup', 3600, ?, ?, ?, ?)`,
-  ).bind(jobId, hostId, `notify-${jobId.slice(0, 8)}`, discordEnabled ? 1 : 0, webhookUrl, now, now).run();
+    `INSERT INTO jobs (id, host_id, slug, name, operation, max_runtime_seconds, created_at, updated_at)
+     VALUES (?, ?, ?, 'Nightly Backup', 'backup', 3600, ?, ?)`,
+  ).bind(jobId, hostId, `notify-${jobId.slice(0, 8)}`, now, now).run();
+  const selectedTargets = targets ?? [await createTarget()];
+  for (const target of selectedTargets) {
+    await env.DB.prepare(
+      "INSERT INTO job_notification_targets (job_id, target_id, created_at) VALUES (?, ?, ?)",
+    ).bind(jobId, target.id, now).run();
+  }
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO alerts (
@@ -47,14 +73,17 @@ async function seedAlert(
     ).bind(alertId, `run_timeout:${alertId}`, hostId, jobId, message, now, now),
     queueOpenNotifications(env.DB, jobId, now),
   ]);
-  return { hostId, jobId, alertId };
+  return { hostId, jobId, alertId, targets: selectedTargets };
 }
 
-async function readDelivery(alertId: string, type = "open"): Promise<DeliveryState | null> {
+async function readDelivery(alertId: string, type = "open", targetId?: string): Promise<DeliveryState | null> {
   return env.DB.prepare(
-    `SELECT status, attempts, next_attempt_at, claimed_at, last_error, sent_at, notification_type
-     FROM notification_deliveries WHERE alert_id = ? AND channel_key = 'discord' AND notification_type = ?`,
-  ).bind(alertId, type).first<DeliveryState>();
+    `SELECT target_id, provider, target_name, status, attempts, next_attempt_at,
+            claimed_at, last_error, sent_at, notification_type
+     FROM notification_deliveries
+     WHERE alert_id = ? AND notification_type = ? ${targetId === undefined ? "" : "AND target_id = ?"}
+     ORDER BY target_id LIMIT 1`,
+  ).bind(...(targetId === undefined ? [alertId, type] : [alertId, type, targetId])).first<DeliveryState>();
 }
 
 afterEach(async () => {
@@ -63,11 +92,12 @@ afterEach(async () => {
   await env.DB.prepare("DELETE FROM schedule_occurrences WHERE schedule_rule_id IN (SELECT s.id FROM job_schedule_rules AS s INNER JOIN jobs AS j ON j.id = s.job_id INNER JOIN hosts AS h ON h.id = j.host_id WHERE h.name LIKE 'notify-host-%' OR h.name LIKE 'recovery-host-%')").run();
   await env.DB.prepare("DELETE FROM jobs WHERE host_id IN (SELECT id FROM hosts WHERE name LIKE 'notify-host-%' OR name LIKE 'recovery-host-%')").run();
   await env.DB.prepare("DELETE FROM hosts WHERE name LIKE 'notify-host-%' OR name LIKE 'recovery-host-%'").run();
+  await env.DB.prepare("DELETE FROM notification_targets WHERE name LIKE 'notify-target-%' OR name LIKE 'recovery-target-%'").run();
 });
 
-describe("per-Job Discord notification outbox", () => {
-  it("sends a confirmed webhook and records delivery separately from the alert", async () => {
-    const { alertId } = await seedAlert();
+describe("notification target outbox", () => {
+  it("sends a confirmed Discord webhook and records delivery separately from the alert", async () => {
+    const { alertId, targets } = await seedAlert();
     let sentUrl = "";
     let sentBody: unknown;
     await runNotificationTick(env.DB, now, {
@@ -80,11 +110,13 @@ describe("per-Job Discord notification outbox", () => {
     expect(new URL(sentUrl).searchParams.get("wait")).toBe("true");
     expect(sentBody).toMatchObject({ allowed_mentions: { parse: [] } });
     expect(JSON.stringify(sentBody)).toContain("Notify Host");
-    expect(await readDelivery(alertId)).toMatchObject({ status: "sent", attempts: 1, sent_at: now, last_error: null });
+    expect(await readDelivery(alertId, "open", targets[0].id)).toMatchObject({
+      provider: "discord", status: "sent", attempts: 1, sent_at: now, last_error: null,
+    });
   });
 
-  it("honors Retry-After and retries stored state on a later invocation", async () => {
-    const { alertId } = await seedAlert();
+  it("honors Discord Retry-After and retries stored state on a later invocation", async () => {
+    const { alertId, targets } = await seedAlert();
     let calls = 0;
     const fetch = async () => {
       calls += 1;
@@ -93,24 +125,28 @@ describe("per-Job Discord notification outbox", () => {
         : new Response(null, { status: 204 });
     };
     await runNotificationTick(env.DB, now, { fetch });
-    expect(await readDelivery(alertId)).toMatchObject({ status: "pending", attempts: 1, next_attempt_at: now + 2_000 });
+    expect(await readDelivery(alertId, "open", targets[0].id)).toMatchObject({
+      status: "pending", attempts: 1, next_attempt_at: now + 2_000,
+    });
     await runNotificationTick(env.DB, now + 2_000, { fetch });
     expect(calls).toBe(2);
-    expect(await readDelivery(alertId)).toMatchObject({ status: "sent", attempts: 2 });
+    expect(await readDelivery(alertId, "open", targets[0].id)).toMatchObject({ status: "sent", attempts: 2 });
   });
 
-  it("uses bounded exponential backoff for server and network failures", async () => {
-    const { alertId } = await seedAlert();
+  it("uses bounded exponential backoff for server failures", async () => {
+    const { alertId, targets } = await seedAlert();
     await runNotificationTick(env.DB, now, {
       fetch: async () => new Response("unavailable", { status: 503 }),
       random: () => 0.5,
     });
-    expect(await readDelivery(alertId)).toMatchObject({ status: "pending", attempts: 1, next_attempt_at: now + minute, last_error: "http_503" });
+    expect(await readDelivery(alertId, "open", targets[0].id)).toMatchObject({
+      status: "pending", attempts: 1, next_attempt_at: now + minute, last_error: "http_503",
+    });
     expect(calculateRetryDelayMs(20, 1)).toBe(6 * 60 * 60_000);
   });
 
-  it("does not enqueue alerts for Jobs with Discord disabled", async () => {
-    const { alertId } = await seedAlert("quiet alert", false);
+  it("creates no delivery when a Job has no notification targets", async () => {
+    const { alertId } = await seedAlert("quiet alert", []);
     expect(await readDelivery(alertId)).toBeNull();
     let calls = 0;
     await runNotificationTick(env.DB, now, {
@@ -122,22 +158,39 @@ describe("per-Job Discord notification outbox", () => {
     expect(calls).toBe(0);
   });
 
-  it("keeps notifications pending until a valid webhook is configured", async () => {
-    const { alertId, jobId } = await seedAlert("Backup did not finish", true, null);
-    await runNotificationTick(env.DB, now, { fetch: async () => new Response(null, { status: 204 }) });
-    expect(await readDelivery(alertId)).toMatchObject({ status: "pending", attempts: 0 });
-    await env.DB.prepare("UPDATE jobs SET discord_webhook_url = ? WHERE id = ?").bind(webhook, jobId).run();
-    await runNotificationTick(env.DB, now, {
-      fetch: async () => new Response(null, { status: 204 }),
-    });
-    expect(await readDelivery(alertId)).toMatchObject({ status: "sent", attempts: 1 });
+  it("leaves queued deliveries paused while their target is disabled, then resumes them", async () => {
+    const { hostId, jobId, alertId, targets } = await seedAlert();
+    const target = targets[0];
+    await env.DB.prepare("UPDATE notification_targets SET enabled = 0 WHERE id = ?").bind(target.id).run();
+    const disabledAlertId = crypto.randomUUID();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO alerts (
+           id, dedupe_key, rule_key, severity, status, host_id, job_id, message, opened_at, created_at
+         ) VALUES (?, ?, 'missed_schedule', 'critical', 'open', ?, ?, 'Disabled target alert', ?, ?)`,
+      ).bind(disabledAlertId, `missed_schedule:${disabledAlertId}`, hostId, jobId, now, now),
+      queueOpenNotifications(env.DB, jobId, now),
+    ]);
+    expect(await readDelivery(disabledAlertId)).toBeNull();
+    let calls = 0;
+    const fetch = async () => {
+      calls += 1;
+      return new Response(null, { status: 204 });
+    };
+    await runNotificationTick(env.DB, now, { fetch });
+    expect(calls).toBe(0);
+    expect(await readDelivery(alertId, "open", target.id)).toMatchObject({ status: "pending", attempts: 0 });
+    await env.DB.prepare("UPDATE notification_targets SET enabled = 1 WHERE id = ?").bind(target.id).run();
+    await runNotificationTick(env.DB, now, { fetch });
+    expect(calls).toBe(1);
+    expect(await readDelivery(alertId, "open", target.id)).toMatchObject({ status: "sent", attempts: 1 });
   });
 
-  it("routes different Jobs to their own Discord webhook URLs", async () => {
-    const webhookA = "https://discord.com/api/webhooks/111111111111111111/webhook-a";
-    const webhookB = "https://discord.com/api/webhooks/222222222222222222/webhook-b";
-    const first = await seedAlert("Alert A", true, webhookA);
-    const second = await seedAlert("Alert B", true, webhookB);
+  it("routes one Job to multiple Discord targets and deduplicates each recipient", async () => {
+    const first = await createTarget("discord", { webhook_url: "https://discord.com/api/webhooks/111111111111111111/webhook-a" });
+    const second = await createTarget("discord", { webhook_url: "https://discord.com/api/webhooks/222222222222222222/webhook-b" });
+    const { alertId, jobId } = await seedAlert("two destinations", [first, second]);
+    await env.DB.batch([queueOpenNotifications(env.DB, jobId, now), queueOpenNotifications(env.DB, jobId, now)]);
     const sentUrls: string[] = [];
     await runNotificationTick(env.DB, now, {
       fetch: async (input) => {
@@ -146,24 +199,63 @@ describe("per-Job Discord notification outbox", () => {
       },
     });
     expect(sentUrls).toHaveLength(2);
-    expect(sentUrls).toContain(`${webhookA}?wait=true`);
-    expect(sentUrls).toContain(`${webhookB}?wait=true`);
-    expect(await readDelivery(first.alertId)).toMatchObject({ status: "sent" });
-    expect(await readDelivery(second.alertId)).toMatchObject({ status: "sent" });
+    expect(sentUrls).toContain("https://discord.com/api/webhooks/111111111111111111/webhook-a?wait=true");
+    expect(sentUrls).toContain("https://discord.com/api/webhooks/222222222222222222/webhook-b?wait=true");
+    expect(await readDelivery(alertId, "open", first.id)).toMatchObject({ status: "sent" });
+    expect(await readDelivery(alertId, "open", second.id)).toMatchObject({ status: "sent" });
   });
 
-  it("creates one recovery delivery when a missed schedule is matched by a late run", async () => {
+  it("sends Telegram text and applies Bot API retry_after without storing the bot token", async () => {
+    const target = await createTarget("telegram", { bot_token: telegramToken, chat_id: "-10012345" });
+    const { alertId } = await seedAlert("Telegram alert", [target]);
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let calls = 0;
+    const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      calls += 1;
+      return calls === 1
+        ? Response.json({ ok: false, error_code: 429, parameters: { retry_after: 17 } }, { status: 429 })
+        : Response.json({ ok: true, result: { message_id: 42 } });
+    };
+    await runNotificationTick(env.DB, now, { fetch });
+    expect(requests[0].url).toBe(`https://api.telegram.org/bot${telegramToken}/sendMessage`);
+    expect(requests[0].body).toMatchObject({ chat_id: "-10012345" });
+    expect(String(requests[0].body.text)).toContain("Telegram alert");
+    expect(await readDelivery(alertId, "open", target.id)).toMatchObject({
+      status: "pending", attempts: 1, next_attempt_at: now + 17_000, last_error: "telegram_rate_limited",
+    });
+    await runNotificationTick(env.DB, now + 17_000, { fetch });
+    expect(calls).toBe(2);
+    expect(await readDelivery(alertId, "open", target.id)).toMatchObject({ status: "sent", attempts: 2 });
+  });
+
+  it("does not persist Telegram request URLs or tokens when a provider fetch throws", async () => {
+    const target = await createTarget("telegram", { bot_token: telegramToken, chat_id: "@backup_alerts" });
+    const { alertId } = await seedAlert("Network issue", [target]);
+    await runNotificationTick(env.DB, now, {
+      fetch: async () => { throw new Error(`fetch failed for ${telegramToken}`); },
+      random: () => 0.5,
+    });
+    const delivery = await readDelivery(alertId, "open", target.id);
+    expect(delivery).toMatchObject({ status: "pending", last_error: "network_or_timeout_error" });
+    expect(delivery?.last_error).not.toContain(telegramToken);
+  });
+
+  it("sends recovery to the original active target and deduplicates the recovery", async () => {
     const hostId = crypto.randomUUID();
     const jobId = crypto.randomUUID();
     const ruleId = crypto.randomUUID();
+    const target = await createTarget("discord", { webhook_url: webhook }, "recovery-target");
     await env.DB.prepare(
       "INSERT INTO hosts (id, name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
     ).bind(hostId, `recovery-host-${hostId.slice(0, 8)}`, "Recovery Host", now, now).run();
     await env.DB.prepare(
-      `INSERT INTO jobs (
-         id, host_id, slug, name, operation, max_runtime_seconds, created_at, updated_at
-       ) VALUES (?, ?, ?, 'Recovery Job', 'backup', 3600, ?, ?)`,
+      `INSERT INTO jobs (id, host_id, slug, name, operation, max_runtime_seconds, created_at, updated_at)
+       VALUES (?, ?, ?, 'Recovery Job', 'backup', 3600, ?, ?)`,
     ).bind(jobId, hostId, `recovery-${jobId.slice(0, 8)}`, now, now).run();
+    await env.DB.prepare(
+      "INSERT INTO job_notification_targets (job_id, target_id, created_at) VALUES (?, ?, ?)",
+    ).bind(jobId, target.id, now).run();
     await env.DB.prepare(
       `INSERT INTO job_schedule_rules (
          id, job_id, schedule_type, expression, timezone, start_grace_seconds, created_at, updated_at
@@ -173,11 +265,12 @@ describe("per-Job Discord notification outbox", () => {
     await runScheduleTick(env.DB, now);
     await runScheduleTick(env.DB, now + 2 * minute + 1_000);
     const missed = await env.DB.prepare(
-      `SELECT id, occurrence_scheduled_for FROM alerts
+      `SELECT id, occurrence_scheduled_for, dedupe_key FROM alerts
        WHERE job_id = ? AND rule_key = 'missed_schedule' AND status = 'open'
        ORDER BY occurrence_scheduled_for DESC LIMIT 1`,
-    ).bind(jobId).first<{ id: string; occurrence_scheduled_for: number }>();
+    ).bind(jobId).first<{ id: string; occurrence_scheduled_for: number; dedupe_key: string }>();
     expect(missed).not.toBeNull();
+    expect(await readDelivery(missed!.id, "open", target.id)).toMatchObject({ status: "pending" });
 
     const runId = crypto.randomUUID();
     const startedAt = missed!.occurrence_scheduled_for + 30_000;
@@ -193,13 +286,29 @@ describe("per-Job Discord notification outbox", () => {
     const resolved = await env.DB.prepare("SELECT status FROM alerts WHERE id = ?")
       .bind(missed!.id).first<{ status: string }>();
     expect(resolved?.status).toBe("resolved");
-    expect(await readDelivery(missed!.id, "recovery")).toMatchObject({ status: "pending", attempts: 0 });
+    expect(await readDelivery(missed!.id, "recovery", target.id)).toMatchObject({ status: "pending", attempts: 0 });
     await env.DB.batch([
-      queueRecoveryNotification(env.DB, `missed_schedule:${jobId}:${missed!.occurrence_scheduled_for}`, resolvedAt),
-      queueRecoveryNotification(env.DB, `missed_schedule:${jobId}:${missed!.occurrence_scheduled_for}`, resolvedAt),
+      queueRecoveryNotification(env.DB, missed!.dedupe_key, resolvedAt),
+      queueRecoveryNotification(env.DB, missed!.dedupe_key, resolvedAt),
     ]);
     expect(await env.DB.prepare(
       "SELECT count(*) AS count FROM notification_deliveries WHERE alert_id = ? AND notification_type = 'recovery'",
     ).bind(missed!.id).first()).toEqual({ count: 1 });
+
+    await env.DB.prepare("DELETE FROM job_notification_targets WHERE job_id = ? AND target_id = ?")
+      .bind(jobId, target.id).run();
+    await env.DB.prepare("UPDATE notification_targets SET enabled = 0 WHERE id = ?").bind(target.id).run();
+    const other = await createTarget("discord", { webhook_url: "https://discord.com/api/webhooks/987654321012345678/new-target" });
+    await env.DB.prepare("INSERT INTO job_notification_targets (job_id, target_id, created_at) VALUES (?, ?, ?)")
+      .bind(jobId, other.id, now).run();
+    await env.DB.prepare("UPDATE notification_targets SET enabled = 1 WHERE id = ?").bind(target.id).run();
+    await runNotificationTick(env.DB, resolvedAt, {
+      fetch: async (input) => {
+        expect(String(input)).toContain("123456789012345678/test-webhook-token");
+        return new Response(null, { status: 204 });
+      },
+    });
+    expect(await readDelivery(missed!.id, "recovery", target.id)).toMatchObject({ status: "sent" });
+    expect(await readDelivery(missed!.id, "recovery", other.id)).toBeNull();
   });
 });

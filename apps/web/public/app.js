@@ -2,9 +2,11 @@ const state = {
   repositories: [],
   adminHosts: [],
   adminRepositories: [],
+  adminNotificationTargets: [],
   adminJobs: [],
   editingHostId: null,
   editingRepositoryId: null,
+  editingNotificationTargetId: null,
   editingJobId: null,
   runCursor: null,
   selectedRepository: null,
@@ -117,17 +119,20 @@ function showAdminMessage(message, isError = false) {
 }
 
 async function loadManagement() {
-  const [hosts, repositories, jobs] = await Promise.all([
+  const [hosts, repositories, notificationTargets, jobs] = await Promise.all([
     api("/api/v1/admin/hosts"),
     api("/api/v1/admin/repositories"),
+    api("/api/v1/admin/notification-targets"),
     api("/api/v1/admin/jobs"),
   ]);
   state.adminHosts = hosts.data;
   state.adminRepositories = repositories.data;
+  state.adminNotificationTargets = notificationTargets.data;
   state.adminJobs = jobs.data;
   const editingJob = state.adminJobs.find((job) => job.id === state.editingJobId);
   renderAdminHostOptions(editingJob?.host_id ?? document.querySelector("#job-host").value);
   renderJobRepositoryFields(editingJob?.repositories ?? []);
+  renderJobNotificationTargets(editingJob?.notification_targets.map((target) => target.id) ?? []);
   renderManagedInventory();
   renderAdminJobs();
 }
@@ -135,6 +140,7 @@ async function loadManagement() {
 function renderManagedInventory() {
   renderManagedHosts();
   renderManagedRepositories();
+  renderManagedNotificationTargets();
 }
 
 function addResourceAction(actions, label, className, handler, disabled = false, title = "") {
@@ -214,6 +220,121 @@ function renderManagedRepositories() {
     );
     row.append(info, actions);
     list.append(row);
+  }
+}
+
+function renderManagedNotificationTargets() {
+  const list = document.querySelector("#notification-target-list");
+  list.replaceChildren();
+  if (state.adminNotificationTargets.length === 0) {
+    list.append(node("p", "empty-state", "등록된 알림 대상이 없습니다."));
+    return;
+  }
+  for (const target of state.adminNotificationTargets) {
+    const jobsCount = Number(target.jobs_count) || 0;
+    const row = node("article", "admin-resource-row");
+    const info = node("div", "admin-resource-info");
+    info.append(node("span", "admin-resource-name", target.name));
+    info.append(node("span", "admin-resource-sub", `${target.provider === "telegram" ? "Telegram" : "Discord"} · ${jobsCount}개 작업 · ${target.enabled ? "사용 중" : "비활성"} · 연결 정보 저장됨`));
+    const actions = node("div", "admin-job-actions");
+    addResourceAction(actions, "수정", "button button-quiet", () => editNotificationTarget(target));
+    addResourceAction(
+      actions,
+      target.enabled ? "비활성화" : "사용",
+      "button button-quiet",
+      () => setNotificationTargetEnabled(target, !target.enabled),
+    );
+    addResourceAction(
+      actions,
+      "삭제",
+      "button button-quiet button-danger-quiet",
+      () => deleteNotificationTarget(target),
+      jobsCount > 0,
+      jobsCount > 0 ? `${jobsCount}개 작업에서 사용 중입니다. 작업에서 연결을 해제한 뒤 삭제하세요.` : "",
+    );
+    row.append(info, actions);
+    list.append(row);
+  }
+}
+
+function editNotificationTarget(target) {
+  resetRepositoryForm();
+  const form = document.querySelector("#notification-target-form");
+  state.editingNotificationTargetId = target.id;
+  form.elements.namedItem("name").value = target.name;
+  form.elements.namedItem("provider").value = target.provider;
+  form.elements.namedItem("provider").disabled = true;
+  form.elements.namedItem("enabled").checked = Boolean(target.enabled);
+  form.elements.namedItem("webhook_url").value = "";
+  form.elements.namedItem("bot_token").value = "";
+  form.elements.namedItem("chat_id").value = "";
+  document.querySelector("#notification-target-help").textContent = "연결 정보 입력란을 비워 두면 기존 값을 유지합니다. 종류 변경은 작업에서 연결을 해제한 뒤 대상을 새로 등록하세요.";
+  document.querySelector("#cancel-notification-target-edit").hidden = false;
+  renderNotificationTargetFields();
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function resetNotificationTargetForm() {
+  const form = document.querySelector("#notification-target-form");
+  state.editingNotificationTargetId = null;
+  form.reset();
+  form.elements.namedItem("provider").disabled = false;
+  form.elements.namedItem("enabled").checked = true;
+  document.querySelector("#notification-target-help").textContent = "연결 정보는 서버에 저장되며 목록과 작업 설정에는 표시되지 않습니다.";
+  document.querySelector("#cancel-notification-target-edit").hidden = true;
+  renderNotificationTargetFields();
+}
+
+function renderNotificationTargetFields() {
+  const provider = document.querySelector("#notification-provider").value;
+  document.querySelector("#discord-target-fields").hidden = provider !== "discord";
+  document.querySelector("#telegram-target-fields").hidden = provider !== "telegram";
+}
+
+function renderJobNotificationTargets(selectedIds = []) {
+  const target = document.querySelector("#job-notification-targets");
+  const selected = new Set(selectedIds);
+  target.replaceChildren();
+  const available = state.adminNotificationTargets.filter((item) => item.enabled || selected.has(item.id));
+  if (available.length === 0) {
+    target.append(node("p", "empty-state", "선택 가능한 알림 대상이 없습니다."));
+    return;
+  }
+  for (const item of available) {
+    const label = node("label", "notification-option");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.name = "notification_target_ids";
+    checkbox.value = item.id;
+    checkbox.checked = selected.has(item.id);
+    label.append(checkbox, node("span", "", `${item.name} · ${item.provider === "telegram" ? "Telegram" : "Discord"}${item.enabled ? "" : " · 비활성 대상"}`));
+    target.append(label);
+  }
+}
+
+async function setNotificationTargetEnabled(target, enabled) {
+  const message = enabled ? "다시 사용" : "비활성화";
+  if (!confirm(`알림 대상 '${target.name}'을(를) ${message}할까요? 비활성화하면 새 알림은 만들지 않고 대기 중 전송도 멈춥니다.`)) return;
+  try {
+    await api(`/api/v1/admin/notification-targets/${encodeURIComponent(target.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ name: target.name, provider: target.provider, enabled }),
+    });
+    await loadManagement();
+    showAdminMessage(enabled ? "알림 대상을 다시 사용합니다." : "알림 대상을 비활성화했습니다.");
+  } catch (error) {
+    showAdminMessage(error.message, true);
+  }
+}
+
+async function deleteNotificationTarget(target) {
+  if (!confirm(`알림 대상 '${target.name}'을(를) 삭제할까요? 연결 작업이 없어야 삭제할 수 있고, 대기 중인 전송은 중단됩니다.`)) return;
+  try {
+    await api(`/api/v1/admin/notification-targets/${encodeURIComponent(target.id)}`, { method: "DELETE" });
+    await loadManagement();
+    showAdminMessage("알림 대상을 삭제했습니다.");
+  } catch (error) {
+    showAdminMessage(error.message, true);
   }
 }
 
@@ -371,7 +492,10 @@ function renderAdminJobs() {
     info.append(node("span", "admin-job-name", `${job.name} · ${job.host_name}`));
     const schedule = job.schedules.map((item) => `${item.expression} (${item.timezone}, grace ${item.start_grace_seconds}s)`).join(" · ");
     const repos = job.repositories.map((item) => item.repository_key).join(", ");
-    info.append(node("span", "admin-job-sub", `${job.slug} · ${job.operation} · ${repos} · ${schedule} · ${job.enabled ? "활성" : "비활성"} · Discord webhook ${job.discord_webhook_configured ? "설정됨" : "미설정"}`));
+    const notificationNames = job.notification_targets.length
+      ? job.notification_targets.map((target) => `${target.name}${target.enabled ? "" : " (비활성)"}`).join(", ")
+      : "알림 없음";
+    info.append(node("span", "admin-job-sub", `${job.slug} · ${job.operation} · ${repos} · ${schedule} · ${job.enabled ? "활성" : "비활성"} · 알림: ${notificationNames}`));
     const actions = node("div", "admin-job-actions");
     const edit = node("button", "button button-quiet", "수정");
     edit.type = "button";
@@ -402,15 +526,9 @@ function editJob(job) {
   form.elements.namedItem("schedules").value = job.schedules.map((item) =>
     `${item.expression}|${item.timezone}|${item.start_grace_seconds}`,
   ).join("\n");
-  form.elements.namedItem("discord_enabled").checked = job.discord_enabled;
-  form.elements.namedItem("discord_webhook_url").value = "";
-  form.elements.namedItem("clear_discord_webhook").checked = false;
-  form.elements.namedItem("clear_discord_webhook").disabled = !job.discord_webhook_configured;
-  document.querySelector("#discord-webhook-help").textContent = job.discord_webhook_configured
-    ? "현재 Webhook 설정됨. 비워 두면 유지하고, 새 URL을 입력하면 교체합니다. URL을 삭제하려면 아래 항목을 선택하세요."
-    : "현재 Webhook 미설정. 새 URL을 입력하면 이 작업에 등록합니다.";
   form.elements.namedItem("enabled").checked = job.enabled;
   renderJobRepositoryFields(job.repositories);
+  renderJobNotificationTargets(job.notification_targets.map((target) => target.id));
   form.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
@@ -423,12 +541,9 @@ function resetJobForm() {
   document.querySelector("#cancel-job-edit").hidden = true;
   form.elements.namedItem("max_runtime_seconds").value = "14400";
   form.elements.namedItem("schedules").value = "0 3 * * *|Asia/Seoul|600";
-  form.elements.namedItem("discord_webhook_url").value = "";
-  form.elements.namedItem("clear_discord_webhook").checked = false;
-  form.elements.namedItem("clear_discord_webhook").disabled = true;
-  document.querySelector("#discord-webhook-help").textContent = "작업별로 알림을 보낼 Discord 채널을 지정합니다.";
   renderAdminHostOptions("");
   renderJobRepositoryFields();
+  renderJobNotificationTargets();
 }
 
 function parseScheduleLines(text) {
@@ -453,9 +568,8 @@ function jobFormPayload(form) {
     operation: value("operation"),
     max_runtime_seconds: Number(value("max_runtime_seconds")),
     tags: value("tags").split(",").map((tag) => tag.trim()).filter(Boolean),
-    discord_enabled: form.elements.namedItem("discord_enabled").checked,
-    discord_webhook_url: value("discord_webhook_url") || undefined,
-    clear_discord_webhook: form.elements.namedItem("clear_discord_webhook").checked,
+    notification_target_ids: [...form.querySelectorAll('input[name="notification_target_ids"]:checked')]
+      .map((checkbox) => checkbox.value),
     enabled: form.elements.namedItem("enabled").checked,
     repositories: [...form.querySelectorAll("select[data-role]")].map((select) => ({
       repository_id: select.value,
@@ -832,12 +946,8 @@ document.querySelector("#job-operation").addEventListener("change", () => render
 document.querySelector("#cancel-job-edit").addEventListener("click", resetJobForm);
 document.querySelector("#cancel-host-edit").addEventListener("click", resetHostForm);
 document.querySelector("#cancel-repository-edit").addEventListener("click", resetRepositoryForm);
-document.querySelector('[name="discord_webhook_url"]').addEventListener("input", (event) => {
-  if (event.currentTarget.value.trim()) document.querySelector('[name="clear_discord_webhook"]').checked = false;
-});
-document.querySelector('[name="clear_discord_webhook"]').addEventListener("change", (event) => {
-  if (event.currentTarget.checked) document.querySelector('[name="discord_webhook_url"]').value = "";
-});
+document.querySelector("#cancel-notification-target-edit").addEventListener("click", resetNotificationTargetForm);
+document.querySelector("#notification-provider").addEventListener("change", renderNotificationTargetFields);
 
 document.querySelector("#host-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -887,6 +997,43 @@ document.querySelector("#repository-form").addEventListener("submit", async (eve
     await loadManagement();
     await loadDashboard();
     showAdminMessage(editing ? "저장소 정보를 수정했습니다." : "저장소를 등록했습니다.");
+  } catch (error) {
+    showAdminMessage(error.message, true);
+  }
+});
+
+document.querySelector("#notification-target-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const provider = form.elements.namedItem("provider").value;
+  const payload = {
+    name: form.elements.namedItem("name").value.trim(),
+    provider,
+    enabled: form.elements.namedItem("enabled").checked,
+  };
+  if (provider === "discord") {
+    const webhookUrl = form.elements.namedItem("webhook_url").value.trim();
+    if (!state.editingNotificationTargetId || webhookUrl) payload.config = { webhook_url: webhookUrl };
+  } else {
+    const botToken = form.elements.namedItem("bot_token").value.trim();
+    const chatId = form.elements.namedItem("chat_id").value.trim();
+    if (Boolean(botToken) !== Boolean(chatId)) {
+      showAdminMessage("Telegram Bot Token과 Chat ID를 함께 입력하세요.", true);
+      return;
+    }
+    if (!state.editingNotificationTargetId || botToken) payload.config = { bot_token: botToken, chat_id: chatId };
+  }
+  try {
+    const editing = state.editingNotificationTargetId !== null;
+    await api(editing
+      ? `/api/v1/admin/notification-targets/${encodeURIComponent(state.editingNotificationTargetId)}`
+      : "/api/v1/admin/notification-targets", {
+      method: editing ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
+    resetNotificationTargetForm();
+    await loadManagement();
+    showAdminMessage(editing ? "알림 대상 설정을 수정했습니다." : "알림 대상을 등록했습니다.");
   } catch (error) {
     showAdminMessage(error.message, true);
   }

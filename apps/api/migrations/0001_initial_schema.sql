@@ -25,8 +25,6 @@ CREATE TABLE jobs (
   description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 2000),
   operation TEXT NOT NULL CHECK (operation IN ('backup', 'forget', 'prune', 'forget_prune', 'copy', 'stats', 'check', 'restore')),
   max_runtime_seconds INTEGER NOT NULL CHECK (max_runtime_seconds BETWEEN 1 AND 31536000),
-  discord_enabled INTEGER NOT NULL DEFAULT 1 CHECK (discord_enabled IN (0, 1)),
-  discord_webhook_url TEXT CHECK (discord_webhook_url IS NULL OR length(discord_webhook_url) BETWEEN 1 AND 2048),
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -44,6 +42,23 @@ CREATE TABLE job_repositories (
   repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
   role TEXT NOT NULL CHECK (role IN ('repository', 'source', 'target')),
   PRIMARY KEY(job_id, repository_id, role)
+);
+
+CREATE TABLE notification_targets (
+  id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 128),
+  provider TEXT NOT NULL CHECK (provider IN ('discord', 'telegram')),
+  config_json TEXT NOT NULL CHECK (length(config_json) BETWEEN 2 AND 4096 AND json_valid(config_json)),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE job_notification_targets (
+  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  target_id TEXT NOT NULL REFERENCES notification_targets(id) ON DELETE RESTRICT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(job_id, target_id)
 );
 
 CREATE TABLE job_ping_tokens (
@@ -175,7 +190,9 @@ CREATE TABLE alerts (
 CREATE TABLE notification_deliveries (
   id TEXT PRIMARY KEY NOT NULL,
   alert_id TEXT NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
-  channel_key TEXT NOT NULL CHECK (length(channel_key) BETWEEN 1 AND 64),
+  target_id TEXT NOT NULL CHECK (length(target_id) = 36),
+  provider TEXT NOT NULL CHECK (provider IN ('discord', 'telegram')),
+  target_name TEXT NOT NULL CHECK (length(target_name) BETWEEN 1 AND 128),
   notification_type TEXT NOT NULL CHECK (notification_type IN ('open', 'recovery')),
   status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'sent', 'dead')),
   attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
@@ -185,7 +202,7 @@ CREATE TABLE notification_deliveries (
   sent_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  UNIQUE(alert_id, channel_key, notification_type)
+  UNIQUE(alert_id, target_id, notification_type)
 );
 
 CREATE INDEX idx_jobs_enabled ON jobs(enabled, host_id);
@@ -204,3 +221,5 @@ CREATE INDEX idx_notification_deliveries_status_next
   ON notification_deliveries(status, next_attempt_at, id);
 CREATE INDEX idx_notification_deliveries_claimed
   ON notification_deliveries(status, claimed_at);
+CREATE INDEX idx_job_notification_targets_target
+  ON job_notification_targets(target_id, job_id);

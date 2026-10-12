@@ -133,14 +133,23 @@ describe("admin configuration API", () => {
        VALUES (?, ?, ?, 'local', ?, ?)`,
     ).bind(repositoryId, `repo-${repositoryId.slice(0, 8)}`, "Test Repository", now, now).run();
 
+    const targetResponse = await post("/notification-targets", {
+      name: "Ops Discord",
+      provider: "discord",
+      config: { webhook_url: webhookUrl },
+    });
+    expect(targetResponse.status).toBe(201);
+    const target = await targetResponse.json() as { id: string; provider: string };
+    expect(target.provider).toBe("discord");
+    expect(JSON.stringify(target)).not.toContain(webhookUrl);
+
     const response = await post("/jobs", {
       host_id: hostId,
       name: "Nightly backup",
       description: "Test job",
       operation: "backup",
       max_runtime_seconds: 7200,
-      discord_enabled: true,
-      discord_webhook_url: webhookUrl,
+      notification_target_ids: [target.id],
       tags: ["production", "restic"],
       repositories: [{ repository_id: repositoryId, role: "repository" }],
       schedules: [
@@ -170,11 +179,15 @@ describe("admin configuration API", () => {
     expect(job.tags).toEqual(["production", "restic"]);
     expect(job.schedules).toHaveLength(2);
     expect(job.repositories).toMatchObject([{ repository_id: repositoryId, role: "repository" }]);
-    expect(job.discord_webhook_configured).toBe(true);
+    expect(job.notification_targets).toMatchObject([{ id: target.id, name: "Ops Discord", provider: "discord", enabled: true }]);
     expect(JSON.stringify(job)).not.toContain(token);
     expect(JSON.stringify(job)).not.toContain(webhookUrl);
-    expect(await env.DB.prepare("SELECT discord_webhook_url FROM jobs WHERE id = ?")
-      .bind(created.id).first()).toEqual({ discord_webhook_url: `${webhookUrl}?wait=true` });
+    const targets = await exports.default.fetch(`${adminBase}/notification-targets`);
+    const targetsJson = await targets.text();
+    expect(targetsJson).toContain("Ops Discord");
+    expect(targetsJson).not.toContain(webhookUrl);
+    expect(await env.DB.prepare("SELECT config_json FROM notification_targets WHERE id = ?")
+      .bind(target.id).first<{ config_json: string }>()).toMatchObject({ config_json: expect.stringContaining(webhookUrl) });
 
     const duplicate = await post("/jobs", {
       host_id: hostId,
@@ -186,14 +199,10 @@ describe("admin configuration API", () => {
       schedules: [{ schedule_type: "cron", expression: "0 3 * * *", timezone: "UTC", start_grace_seconds: 0 }],
     });
     expect(duplicate.status).toBe(409);
-    const invalidWebhook = await post("/jobs", {
-      host_id: hostId,
+    const invalidWebhook = await post("/notification-targets", {
       name: "Invalid webhook",
-      operation: "backup",
-      max_runtime_seconds: 600,
-      discord_webhook_url: "https://attacker.example/webhook",
-      repositories: [{ repository_id: repositoryId, role: "repository" }],
-      schedules: [{ schedule_type: "cron", expression: "0 3 * * *", timezone: "UTC", start_grace_seconds: 0 }],
+      provider: "discord",
+      config: { webhook_url: "https://attacker.example/webhook" },
     });
     expect(invalidWebhook.status).toBe(422);
   });
@@ -244,13 +253,19 @@ describe("admin configuration API", () => {
       `INSERT INTO repositories (id, repository_key, name, backend_type, created_at, updated_at)
        VALUES (?, ?, ?, 'local', ?, ?)`,
     ).bind(localRepoId, `repo-${localRepoId.slice(0, 8)}`, "Editable Repository", now, now).run();
+    const targetResponse = await post("/notification-targets", {
+      name: "Editable notification",
+      provider: "discord",
+      config: { webhook_url: webhookUrl },
+    });
+    const target = await targetResponse.json() as { id: string };
     const input = {
       host_id: localHostId,
       slug: "editable-job",
       name: "Editable Job",
       operation: "backup",
       max_runtime_seconds: 600,
-      discord_enabled: true,
+      notification_target_ids: [target.id],
       enabled: true,
       tags: ["daily"],
       repositories: [{ repository_id: localRepoId, role: "repository" }],
@@ -263,52 +278,33 @@ describe("admin configuration API", () => {
       ...input,
       name: "Disabled Job",
       max_runtime_seconds: 900,
-      discord_enabled: false,
-      discord_webhook_url: webhookUrl,
       enabled: false,
       tags: ["maintenance", "nightly"],
       schedules: [{ ...input.schedules[0], expression: "30 5 * * *", start_grace_seconds: 120 }],
     });
     expect(updated.status).toBe(200);
     expect(await env.DB.prepare(
-      "SELECT host_id, name, enabled, discord_enabled, discord_webhook_url, max_runtime_seconds FROM jobs WHERE id = ?",
+      "SELECT host_id, name, enabled, max_runtime_seconds FROM jobs WHERE id = ?",
     ).bind(id).first()).toEqual({
       host_id: localHostId,
       name: "Disabled Job",
       enabled: 0,
-      discord_enabled: 0,
-      discord_webhook_url: `${webhookUrl}?wait=true`,
       max_runtime_seconds: 900,
     });
+    expect(await env.DB.prepare("SELECT target_id FROM job_notification_targets WHERE job_id = ?")
+      .bind(id).first()).toEqual({ target_id: target.id });
     expect(await env.DB.prepare("SELECT tag FROM job_tags WHERE job_id = ? ORDER BY tag")
       .bind(id).all()).toMatchObject({ results: [{ tag: "maintenance" }, { tag: "nightly" }] });
 
-    const keepWebhook = await put(`/jobs/${id}`, {
+    const removeTarget = await put(`/jobs/${id}`, {
       ...input,
       name: "Keep webhook",
-      discord_enabled: false,
+      notification_target_ids: [],
       enabled: false,
     });
-    expect(keepWebhook.status).toBe(200);
-    expect(await env.DB.prepare("SELECT discord_webhook_url FROM jobs WHERE id = ?")
-      .bind(id).first()).toEqual({ discord_webhook_url: `${webhookUrl}?wait=true` });
-
-    const clearWebhook = await put(`/jobs/${id}`, {
-      ...input,
-      discord_enabled: false,
-      enabled: false,
-      clear_discord_webhook: true,
-    });
-    expect(clearWebhook.status).toBe(200);
-    expect(await env.DB.prepare("SELECT discord_webhook_url FROM jobs WHERE id = ?")
-      .bind(id).first()).toEqual({ discord_webhook_url: null });
-
-    const conflictingWebhookUpdate = await put(`/jobs/${id}`, {
-      ...input,
-      discord_webhook_url: webhookUrl,
-      clear_discord_webhook: true,
-    });
-    expect(conflictingWebhookUpdate.status).toBe(422);
+    expect(removeTarget.status).toBe(200);
+    expect(await env.DB.prepare("SELECT count(*) AS count FROM job_notification_targets WHERE job_id = ?")
+      .bind(id).first()).toEqual({ count: 0 });
     const token = new URL(ping_url).pathname.split("/").at(-1)!;
     expect((await exports.default.fetch(
       `http://localhost/api/v1/ping/${token}/runs/${crypto.randomUUID()}/start`,
@@ -318,6 +314,103 @@ describe("admin configuration API", () => {
     const moved = await put(`/jobs/${id}`, { ...input, host_id: otherHostId });
     expect(moved.status).toBe(409);
     await expect(moved.json()).resolves.toEqual({ error: "job_host_is_immutable" });
+  });
+
+  it("manages reusable Telegram targets without exposing credentials and guards Job references", async () => {
+    const botToken = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi";
+    const create = await post("/notification-targets", {
+      name: "Telegram operations",
+      provider: "telegram",
+      config: { bot_token: botToken, chat_id: "-1001234567890" },
+    });
+    expect(create.status).toBe(201);
+    const target = await create.json() as { id: string; provider: string };
+    expect(target.provider).toBe("telegram");
+
+    const listing = await exports.default.fetch(`${adminBase}/notification-targets`);
+    const listingText = await listing.text();
+    expect(listingText).toContain("Telegram operations");
+    expect(listingText).not.toContain(botToken);
+    expect(listingText).not.toContain("-1001234567890");
+
+    const preserve = await put(`/notification-targets/${target.id}`, {
+      name: "Telegram alerts",
+      provider: "telegram",
+      enabled: false,
+    });
+    expect(preserve.status).toBe(200);
+    expect(await env.DB.prepare("SELECT config_json, enabled FROM notification_targets WHERE id = ?")
+      .bind(target.id).first<{ config_json: string; enabled: number }>()).toMatchObject({
+      config_json: JSON.stringify({ bot_token: botToken, chat_id: "-1001234567890" }),
+      enabled: 0,
+    });
+    expect((await put(`/notification-targets/${target.id}`, {
+      name: "Provider switch",
+      provider: "discord",
+    })).status).toBe(409);
+    expect((await post("/notification-targets", {
+      name: "Bad Telegram",
+      provider: "telegram",
+      config: { bot_token: botToken, chat_id: "bad chat id" },
+    })).status).toBe(422);
+
+    const now = Date.now();
+    const localHostId = crypto.randomUUID();
+    const localRepoId = crypto.randomUUID();
+    await env.DB.prepare(
+      "INSERT INTO hosts (id, name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(localHostId, `target-host-${localHostId.slice(0, 8)}`, "Target Host", now, now).run();
+    await env.DB.prepare(
+      `INSERT INTO repositories (id, repository_key, name, backend_type, created_at, updated_at)
+       VALUES (?, ?, ?, 'local', ?, ?)`,
+    ).bind(localRepoId, `target-repo-${localRepoId.slice(0, 8)}`, "Target Repository", now, now).run();
+    const jobInput = {
+      host_id: localHostId,
+      name: "Telegram Job",
+      operation: "backup",
+      max_runtime_seconds: 600,
+      notification_target_ids: [target.id],
+      repositories: [{ repository_id: localRepoId, role: "repository" }],
+      schedules: [{ schedule_type: "cron", expression: "0 3 * * *", timezone: "UTC", start_grace_seconds: 0 }],
+    };
+    expect((await post("/jobs", jobInput)).status).toBe(422);
+    const enable = await put(`/notification-targets/${target.id}`, {
+      name: "Telegram alerts",
+      provider: "telegram",
+      enabled: true,
+      config: { bot_token: botToken, chat_id: "-1001234567890" },
+    });
+    expect(enable.status).toBe(200);
+    const createdJob = await post("/jobs", jobInput);
+    expect(createdJob.status).toBe(201);
+    const { id: jobId } = await createdJob.json() as { id: string };
+    const blockedDelete = await remove(`/notification-targets/${target.id}`);
+    expect(blockedDelete.status).toBe(409);
+    await expect(blockedDelete.json()).resolves.toMatchObject({ error: "notification_target_in_use", jobs_count: 1 });
+    expect((await put(`/jobs/${jobId}`, { ...jobInput, notification_target_ids: [] })).status).toBe(200);
+
+    const alertId = crypto.randomUUID();
+    const createdAt = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO alerts (
+         id, dedupe_key, rule_key, severity, status, host_id, job_id, message, opened_at, created_at
+       ) VALUES (?, ?, 'run_timeout', 'critical', 'open', ?, ?, 'Pending alert', ?, ?)`,
+    ).bind(alertId, `target-delete:${alertId}`, localHostId, jobId, createdAt, createdAt).run();
+    await env.DB.prepare(
+      `INSERT INTO notification_deliveries (
+         id, alert_id, target_id, provider, target_name, notification_type, status,
+         attempts, next_attempt_at, created_at, updated_at
+       ) VALUES (?, ?, ?, 'telegram', 'Telegram alerts', 'open', 'pending', 0, ?, ?, ?)`,
+    ).bind(crypto.randomUUID(), alertId, target.id, createdAt, createdAt, createdAt).run();
+    expect((await remove(`/notification-targets/${target.id}`)).status).toBe(204);
+    expect(await env.DB.prepare(
+      "SELECT status, last_error, target_name, provider FROM notification_deliveries WHERE alert_id = ?",
+    ).bind(alertId).first()).toEqual({
+      status: "dead",
+      last_error: "notification_target_deleted",
+      target_name: "Telegram alerts",
+      provider: "telegram",
+    });
   });
 
   it("rotates the capability token and rejects administration on another hostname", async () => {

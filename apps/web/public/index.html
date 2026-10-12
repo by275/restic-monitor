@@ -218,6 +218,36 @@
               </section>
             </div>
 
+            <section class="admin-resource-list notification-target-management" aria-labelledby="notification-targets-title">
+              <div class="form-heading">
+                <div><h3 id="notification-targets-title">알림 대상</h3><p>Discord 또는 Telegram 연결을 등록하고 여러 작업에서 함께 사용할 수 있습니다.</p></div>
+              </div>
+              <form id="notification-target-form" class="admin-form admin-resource-form">
+                <div class="admin-fields">
+                  <label>표시 이름 <input name="name" required maxlength="128" placeholder="백업 알림"></label>
+                  <label>종류
+                    <select name="provider" id="notification-provider">
+                      <option value="discord">Discord</option><option value="telegram">Telegram</option>
+                    </select>
+                  </label>
+                  <div id="discord-target-fields" class="wide-field">
+                    <label>Discord Webhook URL <input name="webhook_url" type="url" maxlength="2048" placeholder="https://discord.com/api/webhooks/..."></label>
+                  </div>
+                  <div id="telegram-target-fields" class="wide-field" hidden>
+                    <label>Telegram Bot Token <input name="bot_token" type="password" autocomplete="new-password" maxlength="300"></label>
+                    <label>Telegram Chat ID <input name="chat_id" maxlength="64" placeholder="-1001234567890 또는 @channel"></label>
+                  </div>
+                  <p id="notification-target-help" class="wide-field field-help">연결 정보는 서버에 저장되며 목록과 작업 설정에는 표시되지 않습니다.</p>
+                  <label class="check-field"><input name="enabled" type="checkbox" checked> 알림 대상 사용</label>
+                </div>
+                <div class="form-actions">
+                  <button class="button button-primary" type="submit">알림 대상 저장</button>
+                  <button id="cancel-notification-target-edit" class="button button-quiet" type="button" hidden>수정 취소</button>
+                </div>
+              </form>
+              <div id="notification-target-list" class="stack-list"><p class="empty-state">알림 대상을 불러오는 중입니다.</p></div>
+            </section>
+
             <form id="job-form" class="admin-form job-form">
               <div class="form-heading">
                 <div><h3 id="job-form-title">작업 등록</h3><p>백업과 prune처럼 별도 실행되는 명령은 작업도 따로 등록합니다.</p></div>
@@ -240,9 +270,11 @@
                 <label>Tag (쉼표로 구분) <input name="tags" maxlength="2048" placeholder="home, production"></label>
                 <label class="wide-field">설명 <textarea name="description" maxlength="2000" rows="2"></textarea></label>
                 <label class="wide-field">Cron 규칙 <textarea name="schedules" required rows="3">0 3 * * *|Asia/Seoul|600</textarea><small>한 줄에 하나씩: <code>cron 표현식|시간대|시작 유예 초</code></small></label>
-                <label class="check-field"><input name="discord_enabled" type="checkbox" checked> Discord 알림 사용</label>
-                <label class="wide-field">Discord Webhook URL <input name="discord_webhook_url" type="url" maxlength="2048" placeholder="https://discord.com/api/webhooks/..."><small id="discord-webhook-help">작업별로 알림을 보낼 Discord 채널을 지정합니다. 수정할 때 비워 두면 기존 URL을 유지하고, 새 URL을 입력하면 교체합니다.</small></label>
-                <label class="check-field"><input name="clear_discord_webhook" type="checkbox" disabled> 저장된 Webhook URL 삭제</label>
+                <fieldset class="wide-field notification-selection">
+                  <legend>알림 대상</legend>
+                  <div id="job-notification-targets" class="notification-options"></div>
+                  <small>선택하지 않으면 이 작업은 알림을 보내지 않습니다. 대상의 연결 정보는 위에서 관리합니다.</small>
+                </fieldset>
                 <label class="check-field"><input name="enabled" type="checkbox" checked> 작업 활성화</label>
               </div>
               <button class="button button-primary" type="submit">작업 저장</button>

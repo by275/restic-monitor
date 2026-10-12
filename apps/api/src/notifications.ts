@@ -1,4 +1,3 @@
-const DISCORD_CHANNEL = "discord";
 const MAX_DELIVERIES_PER_TICK = 10;
 const MAX_ATTEMPTS = 8;
 const CLAIM_LEASE_MS = 60_000;
@@ -9,7 +8,10 @@ const MAX_BACKOFF_MS = 6 * 60 * 60_000;
 interface DeliveryRow {
   id: string;
   alert_id: string;
-  discord_webhook_url: string;
+  target_id: string;
+  provider: "discord" | "telegram";
+  target_name: string;
+  config_json: string;
   notification_type: "open" | "recovery";
   attempts: number;
   next_attempt_at: number;
@@ -22,12 +24,18 @@ interface DeliveryRow {
   job_name: string | null;
 }
 
+interface NotificationTargetConfig {
+  webhook_url?: string;
+  bot_token?: string;
+  chat_id?: string;
+}
+
 interface NotificationOptions {
   fetch?: typeof fetch;
   random?: () => number;
 }
 
-/** Add one idempotent open-alert delivery for each active alert on a job. */
+/** Add one idempotent open-alert delivery for every enabled target assigned to the Job. */
 export function queueOpenNotifications(
   db: D1Database,
   jobId: string,
@@ -35,18 +43,19 @@ export function queueOpenNotifications(
 ): D1PreparedStatement {
   return db.prepare(
     `INSERT INTO notification_deliveries (
-       id, alert_id, channel_key, notification_type, status, attempts,
+       id, alert_id, target_id, provider, target_name, notification_type, status, attempts,
        next_attempt_at, created_at, updated_at
      )
-     SELECT lower(hex(randomblob(16))), a.id, ?, 'open', 'pending', 0, ?, ?, ?
+     SELECT lower(hex(randomblob(16))), a.id, t.id, t.provider, t.name, 'open', 'pending', 0, ?, ?, ?
      FROM alerts AS a
-     INNER JOIN jobs AS j ON j.id = a.job_id
-     WHERE a.job_id = ? AND a.status = 'open' AND j.discord_enabled = 1
-     ON CONFLICT(alert_id, channel_key, notification_type) DO NOTHING`,
-  ).bind(DISCORD_CHANNEL, now, now, now, jobId);
+     INNER JOIN job_notification_targets AS jt ON jt.job_id = a.job_id
+     INNER JOIN notification_targets AS t ON t.id = jt.target_id AND t.enabled = 1
+     WHERE a.job_id = ? AND a.status = 'open'
+     ON CONFLICT(alert_id, target_id, notification_type) DO NOTHING`,
+  ).bind(now, now, now, jobId);
 }
 
-/** Add the single recovery delivery after an alert has been resolved. */
+/** Queue recovery to the same active targets that were selected for the open alert. */
 export function queueRecoveryNotification(
   db: D1Database,
   dedupeKey: string,
@@ -54,19 +63,22 @@ export function queueRecoveryNotification(
 ): D1PreparedStatement {
   return db.prepare(
     `INSERT INTO notification_deliveries (
-       id, alert_id, channel_key, notification_type, status, attempts,
+       id, alert_id, target_id, provider, target_name, notification_type, status, attempts,
        next_attempt_at, created_at, updated_at
      )
-     SELECT lower(hex(randomblob(16))), a.id, ?, 'recovery', 'pending', 0, ?, ?, ?
+     SELECT lower(hex(randomblob(16))), a.id, opened.target_id, opened.provider, opened.target_name,
+            'recovery', 'pending', 0, ?, ?, ?
      FROM alerts AS a
-     INNER JOIN jobs AS j ON j.id = a.job_id
+     INNER JOIN notification_deliveries AS opened
+       ON opened.alert_id = a.id AND opened.notification_type = 'open'
+     INNER JOIN notification_targets AS t
+       ON t.id = opened.target_id AND t.enabled = 1 AND t.provider = opened.provider
      WHERE a.dedupe_key = ? AND a.status = 'resolved' AND a.resolved_at = ?
-       AND j.discord_enabled = 1
-     ON CONFLICT(alert_id, channel_key, notification_type) DO NOTHING`,
-  ).bind(DISCORD_CHANNEL, resolvedAt, resolvedAt, resolvedAt, dedupeKey, resolvedAt);
+     ON CONFLICT(alert_id, target_id, notification_type) DO NOTHING`,
+  ).bind(resolvedAt, resolvedAt, resolvedAt, dedupeKey, resolvedAt);
 }
 
-/** Queue recovery notices for every alert resolved by one successful Job run. */
+/** Queue recovery notices for alerts resolved by one successful Job run. */
 export function queueResolvedJobNotifications(
   db: D1Database,
   jobId: string,
@@ -75,16 +87,19 @@ export function queueResolvedJobNotifications(
 ): D1PreparedStatement {
   return db.prepare(
     `INSERT INTO notification_deliveries (
-       id, alert_id, channel_key, notification_type, status, attempts,
+       id, alert_id, target_id, provider, target_name, notification_type, status, attempts,
        next_attempt_at, created_at, updated_at
      )
-     SELECT lower(hex(randomblob(16))), a.id, ?, 'recovery', 'pending', 0, ?, ?, ?
+     SELECT lower(hex(randomblob(16))), a.id, opened.target_id, opened.provider, opened.target_name,
+            'recovery', 'pending', 0, ?, ?, ?
      FROM alerts AS a
-     INNER JOIN jobs AS j ON j.id = a.job_id
-     WHERE a.job_id = ? AND a.rule_key = ? AND a.status = 'resolved'
-       AND a.resolved_at = ? AND j.discord_enabled = 1
-     ON CONFLICT(alert_id, channel_key, notification_type) DO NOTHING`,
-  ).bind(DISCORD_CHANNEL, resolvedAt, resolvedAt, resolvedAt, jobId, ruleKey, resolvedAt);
+     INNER JOIN notification_deliveries AS opened
+       ON opened.alert_id = a.id AND opened.notification_type = 'open'
+     INNER JOIN notification_targets AS t
+       ON t.id = opened.target_id AND t.enabled = 1 AND t.provider = opened.provider
+     WHERE a.job_id = ? AND a.rule_key = ? AND a.status = 'resolved' AND a.resolved_at = ?
+     ON CONFLICT(alert_id, target_id, notification_type) DO NOTHING`,
+  ).bind(resolvedAt, resolvedAt, resolvedAt, jobId, ruleKey, resolvedAt);
 }
 
 /**
@@ -108,28 +123,33 @@ export async function runNotificationTick(
     .run();
 
   const due = await db.prepare(
-    `SELECT d.id, d.alert_id, d.notification_type, d.attempts, d.next_attempt_at,
+    `SELECT d.id, d.alert_id, d.target_id, d.provider, d.target_name, t.config_json,
+            d.notification_type, d.attempts, d.next_attempt_at,
             a.rule_key, a.severity, a.message, a.opened_at, a.resolved_at,
-            h.display_name AS host_name, j.name AS job_name,
-            j.discord_webhook_url
+            h.display_name AS host_name, j.name AS job_name
      FROM notification_deliveries AS d
      INNER JOIN alerts AS a ON a.id = d.alert_id
+     INNER JOIN notification_targets AS t
+       ON t.id = d.target_id AND t.enabled = 1 AND t.provider = d.provider
      LEFT JOIN hosts AS h ON h.id = a.host_id
      LEFT JOIN jobs AS j ON j.id = a.job_id
-     WHERE d.channel_key = ? AND d.attempts < ? AND j.discord_webhook_url IS NOT NULL AND (
+     WHERE d.attempts < ? AND (
        (d.status = 'pending' AND d.next_attempt_at <= ?)
        OR (d.status = 'sending' AND d.claimed_at <= ?)
      )
      ORDER BY d.next_attempt_at ASC, d.id ASC LIMIT ?`,
   )
-    .bind(DISCORD_CHANNEL, MAX_ATTEMPTS, timestamp, reclaimBefore, MAX_DELIVERIES_PER_TICK)
+    .bind(MAX_ATTEMPTS, timestamp, reclaimBefore, MAX_DELIVERIES_PER_TICK)
     .all<DeliveryRow>();
 
   for (const delivery of due.results) {
     const claim = await db.prepare(
-      `UPDATE notification_deliveries
+      `UPDATE notification_deliveries AS d
        SET status = 'sending', attempts = attempts + 1, claimed_at = ?, updated_at = ?
-       WHERE id = ? AND attempts = ? AND (
+       WHERE id = ? AND attempts = ? AND EXISTS (
+         SELECT 1 FROM notification_targets AS t
+         WHERE t.id = d.target_id AND t.enabled = 1 AND t.provider = d.provider
+       ) AND (
          (status = 'pending' AND next_attempt_at <= ?)
          OR (status = 'sending' AND claimed_at <= ?)
        )`,
@@ -139,10 +159,12 @@ export async function runNotificationTick(
     if (claim.meta.changes !== 1) continue;
 
     const attempt = delivery.attempts + 1;
-    const webhookUrl = normalizeDiscordWebhookUrl(delivery.discord_webhook_url);
-    const result = webhookUrl === null
-      ? { kind: "permanent" as const, error: "invalid_discord_webhook_url" }
-      : await sendDiscord(webhookUrl, delivery, options.fetch ?? fetch, timestamp);
+    const config = parseTargetConfig(delivery.config_json);
+    const result = config === null
+      ? { kind: "permanent" as const, error: "invalid_notification_target_config" }
+      : delivery.provider === "discord"
+        ? await sendDiscord(config, delivery, options.fetch ?? fetch, timestamp)
+        : await sendTelegram(config, delivery, options.fetch ?? fetch, timestamp);
     if (result.kind === "sent") {
       await db.prepare(
         `UPDATE notification_deliveries
@@ -202,31 +224,20 @@ export function normalizeDiscordWebhookUrl(value: string | null | undefined): st
   }
 }
 
-type DiscordResult =
+type SendResult =
   | { kind: "sent" }
   | { kind: "retry"; error: string; retryAfterMs?: number }
   | { kind: "permanent"; error: string };
 
 async function sendDiscord(
-  url: string,
+  config: NotificationTargetConfig,
   delivery: DeliveryRow,
   fetchImpl: typeof fetch,
   now: number,
-): Promise<DiscordResult> {
-  const title = delivery.notification_type === "recovery"
-    ? "Backup alert recovered"
-    : "Backup alert";
-  const lines = [
-    `**${title} · ${delivery.severity.toUpperCase()}**`,
-    `${delivery.rule_key}: ${delivery.message}`,
-    `Host: ${cleanLabel(delivery.host_name ?? "unknown")}`,
-    `Job: ${cleanLabel(delivery.job_name ?? "unknown")}`,
-    delivery.notification_type === "recovery" && delivery.resolved_at !== null
-      ? `Resolved: ${new Date(delivery.resolved_at).toISOString()}`
-      : null,
-  ].filter((line): line is string => line !== null);
-  const content = lines.join("\n").slice(0, 1900);
-
+): Promise<SendResult> {
+  const url = normalizeDiscordWebhookUrl(config.webhook_url);
+  if (url === null) return { kind: "permanent", error: "invalid_discord_webhook_url" };
+  const content = renderMessage(delivery, true).slice(0, 1900);
   try {
     const response = await fetchImpl(url, {
       method: "POST",
@@ -237,46 +248,113 @@ async function sendDiscord(
     });
     if (response.ok) return { kind: "sent" };
     if (response.status === 429) {
-      return {
-        kind: "retry",
-        error: "http_429",
-        retryAfterMs: await parseRetryAfterMs(response, now),
-      };
+      return { kind: "retry", error: "http_429", retryAfterMs: await parseRetryAfterMs(response, now) };
     }
-    if (response.status === 408 || response.status >= 500) {
-      return { kind: "retry", error: `http_${response.status}` };
-    }
+    if (response.status === 408 || response.status >= 500) return { kind: "retry", error: `http_${response.status}` };
     return { kind: "permanent", error: `http_${response.status}` };
   } catch {
-    // Do not persist exception text: fetch errors may contain the secret webhook URL.
+    // Fetch errors may include the secret webhook URL. Never persist exception text.
     return { kind: "retry", error: "network_or_timeout_error" };
   }
 }
 
-async function parseRetryAfterMs(response: Response, now: number): Promise<number | undefined> {
+async function sendTelegram(
+  config: NotificationTargetConfig,
+  delivery: DeliveryRow,
+  fetchImpl: typeof fetch,
+  now: number,
+): Promise<SendResult> {
+  if (!config.bot_token || !config.chat_id) {
+    return { kind: "permanent", error: "invalid_telegram_config" };
+  }
+  try {
+    const response = await fetchImpl(`https://api.telegram.org/bot${config.bot_token}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: config.chat_id, text: renderMessage(delivery, false).slice(0, 4096) }),
+      redirect: "error",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      // A malformed success body is retried because the API result is uncertain.
+    }
+    if (response.ok && isRecord(body) && body.ok === true) return { kind: "sent" };
+    const errorCode = isRecord(body) && typeof body.error_code === "number" ? body.error_code : response.status;
+    if (response.status === 429 || errorCode === 429) {
+      return {
+        kind: "retry",
+        error: "telegram_rate_limited",
+        retryAfterMs: await parseRetryAfterMs(response, now, body),
+      };
+    }
+    if (response.status === 408 || response.status >= 500 || errorCode >= 500) {
+      return { kind: "retry", error: `telegram_http_${response.status || errorCode}` };
+    }
+    if (response.ok && body === null) return { kind: "retry", error: "invalid_telegram_response" };
+    return { kind: "permanent", error: `telegram_error_${errorCode}` };
+  } catch {
+    // The request URL contains the bot token. Never persist exception text.
+    return { kind: "retry", error: "network_or_timeout_error" };
+  }
+}
+
+function renderMessage(delivery: DeliveryRow, discord: boolean): string {
+  const title = delivery.notification_type === "recovery" ? "Backup alert recovered" : "Backup alert";
+  const heading = `${title} · ${delivery.severity.toUpperCase()}`;
+  const lines = [
+    discord ? `**${heading}**` : heading,
+    `${delivery.rule_key}: ${delivery.message}`,
+    `Host: ${cleanLabel(delivery.host_name ?? "unknown")}`,
+    `Job: ${cleanLabel(delivery.job_name ?? "unknown")}`,
+    delivery.notification_type === "recovery" && delivery.resolved_at !== null
+      ? `Resolved: ${new Date(delivery.resolved_at).toISOString()}`
+      : null,
+  ].filter((line): line is string => line !== null);
+  return lines.join("\n");
+}
+
+async function parseRetryAfterMs(response: Response, now: number, body?: unknown): Promise<number | undefined> {
   const maxDelay = Math.max(0, Number.MAX_SAFE_INTEGER - now);
   const header = response.headers.get("retry-after");
   if (header !== null) {
     const seconds = Number(header);
-    if (Number.isFinite(seconds) && seconds >= 0) {
-      return Math.min(maxDelay, Math.ceil(seconds * 1000));
-    }
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(maxDelay, Math.ceil(seconds * 1000));
     const date = Date.parse(header);
     if (Number.isFinite(date)) return Math.min(maxDelay, Math.max(0, date - now));
   }
 
-  try {
-    const body: unknown = await response.json();
-    if (typeof body === "object" && body !== null && "retry_after" in body) {
-      const retryAfter = (body as { retry_after?: unknown }).retry_after;
-      if (typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter >= 0) {
-        return Math.min(maxDelay, Math.ceil(retryAfter * 1000));
-      }
+  let responseBody = body;
+  if (responseBody === undefined) {
+    try {
+      responseBody = await response.json();
+    } catch {
+      return undefined;
     }
-  } catch {
-    // Retry with exponential backoff when Discord's response has no valid hint.
+  }
+  if (isRecord(responseBody)) {
+    const parameters = isRecord(responseBody.parameters) ? responseBody.parameters : null;
+    const retryAfter = parameters?.retry_after ?? responseBody.retry_after;
+    if (typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter >= 0) {
+      return Math.min(maxDelay, Math.ceil(retryAfter * 1000));
+    }
   }
   return undefined;
+}
+
+function parseTargetConfig(raw: string): NotificationTargetConfig | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isRecord(parsed) ? parsed as NotificationTargetConfig : null;
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function cleanLabel(value: string): string {

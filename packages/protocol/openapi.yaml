@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Restic Monitor API
   version: 1.0.0
-  description: Job registration, execution pings, and read-only dashboard API.
+  description: Job and notification configuration, execution pings, and read-only dashboard API.
 servers:
   - url: https://monitor.example.invalid
 paths:
@@ -108,9 +108,9 @@ paths:
   /api/v1/admin/jobs:
     get:
       operationId: listJobsForAdmin
-      summary: List Job configuration without returning ping tokens or webhook URLs
+      summary: List Job configuration without returning ping tokens or notification credentials
       responses:
-        '200': { description: Jobs with tags, schedules, repository associations, and a webhook-configured flag }
+        '200': { description: Jobs with tags, schedules, repository associations, and notification target references }
     post:
       operationId: createJob
       summary: Create a Job and return its ping URL once
@@ -123,6 +123,47 @@ paths:
         '201': { description: Job created; response includes one-time ping_url }
         '422': { description: Invalid Job, schedule, or inventory association }
         '503': { description: PING_BASE_URL is missing or unsafe }
+  /api/v1/admin/notification-targets:
+    get:
+      operationId: listNotificationTargets
+      summary: List registered notification destinations without credentials
+      responses:
+        '200': { description: Notification target metadata and Job usage counts }
+    post:
+      operationId: createNotificationTarget
+      summary: Register a Discord or Telegram notification destination
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationTargetCreate' }
+      responses:
+        '201': { description: Target created; credentials are not returned }
+        '422': { description: Invalid provider configuration }
+  /api/v1/admin/notification-targets/{target_id}:
+    parameters:
+      - name: target_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: updateNotificationTarget
+      summary: Rename, enable, or replace credentials for a notification destination
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationTargetUpdate' }
+      responses:
+        '200': { description: Target updated; omitted credentials are preserved }
+        '409': { description: Provider type is immutable }
+        '422': { description: Invalid provider configuration }
+    delete:
+      operationId: deleteNotificationTarget
+      summary: Delete an unused notification destination
+      responses:
+        '204': { description: Target deleted and pending deliveries stopped }
+        '409': { description: Target is still assigned to one or more Jobs }
   /api/v1/admin/jobs/{job_id}:
     parameters:
       - $ref: '#/components/parameters/JobId'
@@ -217,16 +258,13 @@ components:
         description: { type: string, maxLength: 2000 }
         operation: { type: string, enum: [backup, forget, prune, forget_prune, copy, stats, check, restore] }
         max_runtime_seconds: { type: integer, minimum: 1, maximum: 31536000 }
-        discord_enabled: { type: boolean, default: true }
-        discord_webhook_url:
-          type: string
-          format: uri
-          maxLength: 2048
-          description: Optional per-Job Discord webhook URL. It can be replaced on update; list responses expose only whether one is configured.
-        clear_discord_webhook:
-          type: boolean
-          default: false
-          description: Update only. Set true to remove the configured webhook; cannot be combined with discord_webhook_url.
+        notification_target_ids:
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          default: []
+          items: { type: string, format: uuid }
+          description: Zero or more registered destinations. An empty list disables notifications for this Job.
         enabled: { type: boolean, default: true }
         tags:
           type: array
@@ -254,3 +292,38 @@ components:
               expression: { type: string, description: Standard five-field cron expression }
               timezone: { type: string, description: IANA timezone name }
               start_grace_seconds: { type: integer, minimum: 0, maximum: 31536000 }
+    NotificationTargetCreate:
+      oneOf:
+        - type: object
+          required: [name, provider, config]
+          properties:
+            name: { type: string, minLength: 1, maxLength: 128 }
+            provider: { const: discord }
+            enabled: { type: boolean, default: true }
+            config:
+              type: object
+              required: [webhook_url]
+              properties:
+                webhook_url: { type: string, format: uri, maxLength: 2048 }
+        - type: object
+          required: [name, provider, config]
+          properties:
+            name: { type: string, minLength: 1, maxLength: 128 }
+            provider: { const: telegram }
+            enabled: { type: boolean, default: true }
+            config:
+              type: object
+              required: [bot_token, chat_id]
+              properties:
+                bot_token: { type: string, minLength: 26, maxLength: 272 }
+                chat_id: { type: string, minLength: 1, maxLength: 64 }
+    NotificationTargetUpdate:
+      type: object
+      required: [name, provider]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        provider: { type: string, enum: [discord, telegram] }
+        enabled: { type: boolean, default: true }
+        config:
+          type: object
+          description: Optional replacement credentials; omitted config retains existing values.
