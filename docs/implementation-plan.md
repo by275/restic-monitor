@@ -1,6 +1,6 @@
 # Restic Monitor implementation plan
 
-- Status: Stages 1–9 implemented; Stages 10–11 remain
+- Status: Stages 1–10 implemented; Stage 11 remains
 - API path version: v1 (no release or deployed client requires a protocol migration)
 - Database baseline: resettable development database; no existing-data backfill or compatibility migration is required
 - Scope: server-side Job configuration, ping API, schedule monitoring, reusable Discord/Telegram notification targets, dashboard, and small Bash/PowerShell examples
@@ -19,10 +19,10 @@
 | 7. Per-Job Discord webhook configuration | Complete | Admin API and UI replace/remove each Job URL; outbox routes to the owning Job's URL; D1/API/outbox tests |
 | 8. Host/Repository edit, availability, and deletion controls | Complete | D1/API tests and browser smoke for registration, edit, hide/restore, and unused-resource deletion |
 | 9. Reusable Discord/Telegram notification targets | Complete | D1/API/outbox coverage for both providers; secret-safe responses; browser smoke for target registration and Job assignment/edit |
-| 10. SFPanel-inspired dashboard and admin UI refresh | Planned | Restic Monitor-specific design and browser smoke; no direct SFPanel source reuse |
+| 10. SFPanel-inspired dashboard and admin UI refresh | Complete | Responsive navigation, clearer dashboard hierarchy, settings navigation, and desktop/mobile browser smoke; no direct SFPanel source reuse |
 | 11. `DEPLOY_*` Wrangler customization | Planned | Synthetic config generation tests and deployment guide |
 
-`corepack pnpm test` and `corepack pnpm typecheck` pass: 13 protocol tests, 33 Worker/D1 tests, the synthetic Bash client test, and static JavaScript validation. Stage 9 browser smoke covered Discord and Telegram target registration, credential-free list responses, Job assignment and removal, and target options in the Job editor. Cloudflare Access policy, production D1, deployed hostname routing, and edge rate limiting are operator configuration and have not been deployed or verified here. Timeout and missed-schedule detection run on the Worker Cron every five minutes, so alert detection can lag the configured boundary by up to one Cron interval.
+`corepack pnpm test` and `corepack pnpm typecheck` pass: 13 protocol tests, 33 Worker/D1 tests, the synthetic Bash client test, and static JavaScript validation. Stage 9 browser smoke covered Discord and Telegram target registration, credential-free list responses, Job assignment and removal, and target options in the Job editor. Stage 10 browser smoke covered desktop layout, settings navigation, and a 390px mobile viewport with no horizontal page overflow. Cloudflare Access policy, production D1, deployed hostname routing, and edge rate limiting are operator configuration and have not been deployed or verified here. Timeout and missed-schedule detection run on the Worker Cron every five minutes, so alert detection can lag the configured boundary by up to one Cron interval.
 
 ## Product model
 
@@ -140,7 +140,9 @@ Since there is no production data to preserve, replace the initial schema and ve
 
 Make dashboard status, recent runs, resource management, Job editing, and notification targets easier to scan and operate. Use SFPanel as a visual reference only; do not copy source components. Keep the existing static HTML/JavaScript structure for this refresh unless a concrete need for React appears. Treat a React/Vite port and direct SFPanel code reuse as separate decisions because they change the asset build and licensing scope.
 
-**Tests:** static checks, keyboard and narrow-screen interaction review, and synthetic-data browser smoke for dashboard filters, management actions, forms, and confirmation states.
+The refresh adds a persistent section navigator on desktop, a compact responsive navigator on smaller screens, a clearer status hierarchy, and direct navigation into Settings. SFPanel is a full server-management application rather than a standalone dashboard UI kit; its current frontend is React/TypeScript and the project declares AGPL-3.0. The Restic Monitor UI keeps its existing static asset pipeline and uses the project only as a visual reference. See [SFPanel README](https://github.com/svrforum/SFPanel/blob/main/README.en.md) and [license inventory](https://github.com/svrforum/SFPanel/blob/main/THIRD-PARTY-LICENSES.md).
+
+**Tests:** static checks, desktop browser smoke, Settings navigation, and a 390px viewport check with no horizontal page overflow.
 
 ### Stage 11 — `DEPLOY_*` Wrangler customization
 

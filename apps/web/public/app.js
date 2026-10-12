@@ -948,6 +948,22 @@ document.querySelector("#cancel-host-edit").addEventListener("click", resetHostF
 document.querySelector("#cancel-repository-edit").addEventListener("click", resetRepositoryForm);
 document.querySelector("#cancel-notification-target-edit").addEventListener("click", resetNotificationTargetForm);
 document.querySelector("#notification-provider").addEventListener("change", renderNotificationTargetFields);
+for (const link of document.querySelectorAll(".sidebar-nav a")) {
+  link.addEventListener("click", () => {
+    if (link.hash === "#settings") document.querySelector("#settings").open = true;
+  });
+}
+window.addEventListener("hashchange", () => {
+  const activeHash = window.location.hash || "#overview";
+  for (const link of document.querySelectorAll(".sidebar-nav a")) {
+    if (link.hash === activeHash) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+});
+for (const link of document.querySelectorAll(".sidebar-nav a")) {
+  if (link.hash === (window.location.hash || "#overview")) link.setAttribute("aria-current", "page");
+  else link.removeAttribute("aria-current");
+}
 
 document.querySelector("#host-form").addEventListener("submit", async (event) => {
   event.preventDefault();
