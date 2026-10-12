@@ -9,6 +9,7 @@ const MAX_BACKOFF_MS = 6 * 60 * 60_000;
 interface DeliveryRow {
   id: string;
   alert_id: string;
+  discord_webhook_url: string;
   notification_type: "open" | "recovery";
   attempts: number;
   next_attempt_at: number;
@@ -92,20 +93,9 @@ export function queueResolvedJobNotifications(
  */
 export async function runNotificationTick(
   db: D1Database,
-  webhookSecret: string | undefined,
   now: number,
   options: NotificationOptions = {},
 ): Promise<void> {
-  const webhookUrl = normalizeWebhookUrl(webhookSecret);
-  if (webhookUrl === null) {
-    if (webhookSecret?.trim()) {
-      console.error("Discord webhook secret is not a valid discord.com webhook URL");
-    } else {
-      console.warn("Discord webhook secret is not configured; pending alerts retained");
-    }
-    return;
-  }
-
   const timestamp = Math.max(0, Math.trunc(now));
   const reclaimBefore = timestamp - CLAIM_LEASE_MS;
   await db.prepare(
@@ -120,12 +110,13 @@ export async function runNotificationTick(
   const due = await db.prepare(
     `SELECT d.id, d.alert_id, d.notification_type, d.attempts, d.next_attempt_at,
             a.rule_key, a.severity, a.message, a.opened_at, a.resolved_at,
-            h.display_name AS host_name, j.name AS job_name
+            h.display_name AS host_name, j.name AS job_name,
+            j.discord_webhook_url
      FROM notification_deliveries AS d
      INNER JOIN alerts AS a ON a.id = d.alert_id
      LEFT JOIN hosts AS h ON h.id = a.host_id
      LEFT JOIN jobs AS j ON j.id = a.job_id
-     WHERE d.channel_key = ? AND d.attempts < ? AND (
+     WHERE d.channel_key = ? AND d.attempts < ? AND j.discord_webhook_url IS NOT NULL AND (
        (d.status = 'pending' AND d.next_attempt_at <= ?)
        OR (d.status = 'sending' AND d.claimed_at <= ?)
      )
@@ -148,7 +139,10 @@ export async function runNotificationTick(
     if (claim.meta.changes !== 1) continue;
 
     const attempt = delivery.attempts + 1;
-    const result = await sendDiscord(webhookUrl, delivery, options.fetch ?? fetch, timestamp);
+    const webhookUrl = normalizeDiscordWebhookUrl(delivery.discord_webhook_url);
+    const result = webhookUrl === null
+      ? { kind: "permanent" as const, error: "invalid_discord_webhook_url" }
+      : await sendDiscord(webhookUrl, delivery, options.fetch ?? fetch, timestamp);
     if (result.kind === "sent") {
       await db.prepare(
         `UPDATE notification_deliveries
@@ -185,11 +179,11 @@ export function calculateRetryDelayMs(attempt: number, randomValue = 0.5): numbe
   return Math.min(MAX_BACKOFF_MS, Math.round(base * jitter));
 }
 
-function normalizeWebhookUrl(secret: string | undefined): string | null {
-  const value = secret?.trim();
-  if (!value) return null;
+export function normalizeDiscordWebhookUrl(value: string | null | undefined): string | null {
+  const normalizedValue = value?.trim();
+  if (!normalizedValue) return null;
   try {
-    const url = new URL(value);
+    const url = new URL(normalizedValue);
     if (
       url.protocol !== "https:" ||
       url.hostname !== "discord.com" ||

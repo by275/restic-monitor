@@ -108,9 +108,9 @@ paths:
   /api/v1/admin/jobs:
     get:
       operationId: listJobsForAdmin
-      summary: List Job configuration without returning ping secrets
+      summary: List Job configuration without returning ping tokens or webhook URLs
       responses:
-        '200': { description: Jobs with tags, schedules, and repository associations }
+        '200': { description: Jobs with tags, schedules, repository associations, and a webhook-configured flag }
     post:
       operationId: createJob
       summary: Create a Job and return its ping URL once
@@ -218,6 +218,15 @@ components:
         operation: { type: string, enum: [backup, forget, prune, forget_prune, copy, stats, check, restore] }
         max_runtime_seconds: { type: integer, minimum: 1, maximum: 31536000 }
         discord_enabled: { type: boolean, default: true }
+        discord_webhook_url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: Optional per-Job Discord webhook URL. It can be replaced on update; list responses expose only whether one is configured.
+        clear_discord_webhook:
+          type: boolean
+          default: false
+          description: Update only. Set true to remove the configured webhook; cannot be combined with discord_webhook_url.
         enabled: { type: boolean, default: true }
         tags:
           type: array

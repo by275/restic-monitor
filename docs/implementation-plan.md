@@ -1,9 +1,9 @@
 # Restic Monitor implementation plan
 
-- Status: stages 1–6 implemented and locally verified; production deployment remains separate
+- Status: stages 1–7 implemented and locally verified; production deployment remains separate
 - API path version: v1 (no release or deployed client requires a protocol migration)
 - Database baseline: resettable development database; no existing-data backfill or compatibility migration is required
-- Scope: server-side Job configuration, ping API, schedule monitoring, Discord alerts, dashboard, and small Bash/PowerShell examples
+- Scope: server-side Job configuration, ping API, schedule monitoring, per-Job Discord alerts, dashboard, and small Bash/PowerShell examples
 - Out of scope: a required Reporter product, modifying an existing Docker/cron host, or editing the sibling `docker-restic` repository
 
 ## Current implementation status
@@ -16,8 +16,9 @@
 | 4. Schedule and alerts | Complete | Multiple cron rules, grace boundaries, catch-up, DST, timeout, recovery, Discord preference, and outbox retry tests |
 | 5. Management/status UI | Complete | Static JavaScript check plus local browser smoke for Host/Repository/Job create, one-time URL display, and Job edit |
 | 6. Client examples and scope cleanup | Complete | Bash example with fake Restic/curl and synthetic fixtures; PowerShell runtime is unavailable in this Linux environment |
+| 7. Per-Job Discord webhook configuration | Complete | Admin API and UI replace/remove each Job URL; outbox routes to the owning Job's URL; D1/API/outbox tests |
 
-`corepack pnpm test` and `corepack pnpm typecheck` pass: 13 protocol tests, 28 Worker/D1 tests, the synthetic Bash client test, and static JavaScript validation. The local dashboard browser smoke covered Host/Repository/Job creation, one-time URL display, and Job edit. Cloudflare Access policy, production D1, deployed hostname routing, and edge rate limiting are operator configuration and have not been deployed or verified here. Timeout and missed-schedule detection run on the Worker Cron every five minutes, so alert detection can lag the configured boundary by up to one Cron interval.
+`corepack pnpm test` and `corepack pnpm typecheck` pass: 13 protocol tests, 29 Worker/D1 tests, the synthetic Bash client test, and static JavaScript validation. The local dashboard browser smoke covered Host/Repository/Job creation, one-time URL display, Job edit, and per-Job webhook status. Cloudflare Access policy, production D1, deployed hostname routing, and edge rate limiting are operator configuration and have not been deployed or verified here. Timeout and missed-schedule detection run on the Worker Cron every five minutes, so alert detection can lag the configured boundary by up to one Cron interval.
 
 ## Product model
 
@@ -48,7 +49,7 @@ Initial schedule support is standard five-field cron with an IANA timezone. The 
 
 Start grace is the wait after a scheduled occurrence for a start ping. Maximum runtime is separate and starts when the server receives the start ping. This prevents a short late-start allowance from incorrectly timing out a long Restic run. Both values are configured on the server.
 
-Job registration includes Discord enablement. The Discord webhook remains a Cloudflare Secret shared by configured Jobs; per-job preferences determine which alerts enter the notification outbox. Existing exit-code reporting, schedule-missed/timeout detection, repository-stats growth alerts, deduplication, and notification retry behavior are retained.
+Job registration includes Discord enablement and an optional Discord webhook URL per Job. The URL is stored on the Job in D1; the admin form can replace or remove it, and list responses expose only a configured flag. Per-job preferences determine which alerts enter the notification outbox, and the outbox sends each delivery to its Job's URL. Existing exit-code reporting, schedule-missed/timeout detection, repository-stats growth alerts, deduplication, and notification retry behavior are retained.
 
 ## Fresh D1 data model
 
@@ -57,7 +58,7 @@ The local D1 can be deleted and recreated during this pre-release redesign. Keep
 | Table | Purpose |
 |---|---|
 | `hosts`, `repositories` | Admin-managed inventory |
-| `jobs` | Name, description, slug, operation, host, timeout, enabled and Discord preference |
+| `jobs` | Name, description, slug, operation, host, timeout, enabled, Discord preference and optional webhook URL |
 | `job_tags` | Job labels |
 | `job_repositories` | Configured repository roles for a Job |
 | `job_ping_tokens` | Hash-only, revocable per-Job ping capabilities |
@@ -104,6 +105,12 @@ Provide Bash/curl and PowerShell examples that run an existing Restic command, k
 
 **Tests:** Bash parser fixtures for Restic 0.19.1 backup JSON Lines and stats JSON, exit codes 0/3/130/unknown, malformed/partial output, HTTP retries, and stable run ID/body. These tests use fake Restic and curl executables and never initialize or access a real repository. PowerShell has not been run because this environment has no PowerShell runtime.
 
+### Stage 7 — Per-Job Discord webhook targets
+
+Move webhook configuration from one Worker-wide Secret to an optional URL on each Job. Allow Job creation and editing to set, replace, preserve, or remove the URL. Route outbox deliveries through the webhook configured on the owning Job; keep deliveries pending when that Job has no URL. Do not return webhook URL values from the Job listing API.
+
+**Tests:** accept only Discord webhook URLs, verify create/replace/preserve/remove behavior, keep URL values out of listing responses, retain pending deliveries without a target, and send different Jobs to their own targets.
+
 ## Restic JSON handling for examples
 
 The API stores only a small, stable subset parsed on the client. Restic `backup --json` emits newline-delimited JSON; the last successful `summary` contains `data_added`, `data_added_packed`, `total_bytes_processed`, file counts, and an optional `snapshot_id`. `stats --json` emits one JSON object, whose `total_size` depends on the selected mode. The client must send an explicit `mode` with Repository stats. `prune` does not currently support JSON, and `forget --prune` can mix JSON and text, so the examples report its exit code without trying to parse detailed prune output.
@@ -112,4 +119,4 @@ Restic may emit structured fatal-error JSON on stderr, while runtime/argument fa
 
 ## Deployment boundary
 
-Local Vitest/Wrangler D1 tests do not deploy anything. Production setup remains opt-in: create a new D1 database from the clean schema, configure the Worker and dashboard Access policy, set the Discord webhook Secret, create Jobs in the UI, and install the generated ping URL in an existing scheduler. Never edit the sibling `docker-restic` repository as part of this project.
+Local Vitest/Wrangler D1 tests do not deploy anything. Production setup remains opt-in: create a new D1 database from the clean schema, configure the Worker and dashboard Access policy, register per-Job Discord webhook URLs in the UI, and install each generated ping URL in an existing scheduler. Never edit the sibling `docker-restic` repository as part of this project.

@@ -25,6 +25,7 @@ interface DeliveryState {
 async function seedAlert(
   message = "Backup did not finish",
   discordEnabled = true,
+  webhookUrl: string | null = webhook,
 ): Promise<{ hostId: string; jobId: string; alertId: string }> {
   const hostId = crypto.randomUUID();
   const jobId = crypto.randomUUID();
@@ -34,9 +35,10 @@ async function seedAlert(
   ).bind(hostId, `notify-host-${hostId.slice(0, 8)}`, "Notify Host", now, now).run();
   await env.DB.prepare(
     `INSERT INTO jobs (
-       id, host_id, slug, name, operation, max_runtime_seconds, discord_enabled, created_at, updated_at
-     ) VALUES (?, ?, ?, 'Nightly Backup', 'backup', 3600, ?, ?, ?)`,
-  ).bind(jobId, hostId, `notify-${jobId.slice(0, 8)}`, discordEnabled ? 1 : 0, now, now).run();
+       id, host_id, slug, name, operation, max_runtime_seconds, discord_enabled,
+       discord_webhook_url, created_at, updated_at
+     ) VALUES (?, ?, ?, 'Nightly Backup', 'backup', 3600, ?, ?, ?, ?)`,
+  ).bind(jobId, hostId, `notify-${jobId.slice(0, 8)}`, discordEnabled ? 1 : 0, webhookUrl, now, now).run();
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO alerts (
@@ -68,7 +70,7 @@ describe("per-Job Discord notification outbox", () => {
     const { alertId } = await seedAlert();
     let sentUrl = "";
     let sentBody: unknown;
-    await runNotificationTick(env.DB, webhook, now, {
+    await runNotificationTick(env.DB, now, {
       fetch: async (input, init) => {
         sentUrl = String(input);
         sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -90,16 +92,16 @@ describe("per-Job Discord notification outbox", () => {
         ? new Response(JSON.stringify({ retry_after: 99 }), { status: 429, headers: { "Retry-After": "2" } })
         : new Response(null, { status: 204 });
     };
-    await runNotificationTick(env.DB, webhook, now, { fetch });
+    await runNotificationTick(env.DB, now, { fetch });
     expect(await readDelivery(alertId)).toMatchObject({ status: "pending", attempts: 1, next_attempt_at: now + 2_000 });
-    await runNotificationTick(env.DB, webhook, now + 2_000, { fetch });
+    await runNotificationTick(env.DB, now + 2_000, { fetch });
     expect(calls).toBe(2);
     expect(await readDelivery(alertId)).toMatchObject({ status: "sent", attempts: 2 });
   });
 
   it("uses bounded exponential backoff for server and network failures", async () => {
     const { alertId } = await seedAlert();
-    await runNotificationTick(env.DB, webhook, now, {
+    await runNotificationTick(env.DB, now, {
       fetch: async () => new Response("unavailable", { status: 503 }),
       random: () => 0.5,
     });
@@ -111,7 +113,7 @@ describe("per-Job Discord notification outbox", () => {
     const { alertId } = await seedAlert("quiet alert", false);
     expect(await readDelivery(alertId)).toBeNull();
     let calls = 0;
-    await runNotificationTick(env.DB, webhook, now, {
+    await runNotificationTick(env.DB, now, {
       fetch: async () => {
         calls += 1;
         return new Response(null, { status: 204 });
@@ -121,13 +123,33 @@ describe("per-Job Discord notification outbox", () => {
   });
 
   it("keeps notifications pending until a valid webhook is configured", async () => {
-    const { alertId } = await seedAlert();
-    await runNotificationTick(env.DB, undefined, now, { fetch: async () => new Response(null, { status: 204 }) });
+    const { alertId, jobId } = await seedAlert("Backup did not finish", true, null);
+    await runNotificationTick(env.DB, now, { fetch: async () => new Response(null, { status: 204 }) });
     expect(await readDelivery(alertId)).toMatchObject({ status: "pending", attempts: 0 });
-    await runNotificationTick(env.DB, "https://attacker.example/not-a-webhook", now, {
+    await env.DB.prepare("UPDATE jobs SET discord_webhook_url = ? WHERE id = ?").bind(webhook, jobId).run();
+    await runNotificationTick(env.DB, now, {
       fetch: async () => new Response(null, { status: 204 }),
     });
-    expect(await readDelivery(alertId)).toMatchObject({ status: "pending", attempts: 0 });
+    expect(await readDelivery(alertId)).toMatchObject({ status: "sent", attempts: 1 });
+  });
+
+  it("routes different Jobs to their own Discord webhook URLs", async () => {
+    const webhookA = "https://discord.com/api/webhooks/111111111111111111/webhook-a";
+    const webhookB = "https://discord.com/api/webhooks/222222222222222222/webhook-b";
+    const first = await seedAlert("Alert A", true, webhookA);
+    const second = await seedAlert("Alert B", true, webhookB);
+    const sentUrls: string[] = [];
+    await runNotificationTick(env.DB, now, {
+      fetch: async (input) => {
+        sentUrls.push(String(input));
+        return new Response(null, { status: 204 });
+      },
+    });
+    expect(sentUrls).toHaveLength(2);
+    expect(sentUrls).toContain(`${webhookA}?wait=true`);
+    expect(sentUrls).toContain(`${webhookB}?wait=true`);
+    expect(await readDelivery(first.alertId)).toMatchObject({ status: "sent" });
+    expect(await readDelivery(second.alertId)).toMatchObject({ status: "sent" });
   });
 
   it("creates one recovery delivery when a missed schedule is matched by a late run", async () => {

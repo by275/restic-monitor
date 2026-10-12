@@ -1,5 +1,6 @@
 import { Cron } from "croner";
 import { Hono, type Context } from "hono";
+import { normalizeDiscordWebhookUrl } from "./notifications";
 import { createPingToken, normalizeSlug, sha256Hex, UUID_PATTERN } from "./security";
 
 const api = new Hono<{ Bindings: Env }>();
@@ -29,6 +30,8 @@ interface JobInput {
   operation: string;
   max_runtime_seconds: number;
   discord_enabled?: boolean;
+  discord_webhook_url?: string;
+  clear_discord_webhook?: boolean;
   enabled?: boolean;
   tags?: string[];
   repositories: RepositoryInput[];
@@ -124,7 +127,8 @@ api.get("/jobs", async (context) => {
   try {
     const result = await context.env.DB.prepare(
       `SELECT j.id, j.host_id, h.display_name AS host_name, j.slug, j.name, j.description,
-              j.operation, j.max_runtime_seconds, j.discord_enabled, j.enabled,
+              j.operation, j.max_runtime_seconds, j.discord_enabled,
+              (j.discord_webhook_url IS NOT NULL) AS discord_webhook_configured, j.enabled,
               j.created_at, j.updated_at,
               COALESCE((SELECT json_group_array(tag) FROM job_tags AS t WHERE t.job_id = j.id), '[]') AS tags_json,
               COALESCE((SELECT json_group_array(json_object(
@@ -154,6 +158,9 @@ api.post("/jobs", async (context) => {
   const validation = validateJob(parsed.value);
   if (!validation.ok) return context.json({ error: validation.error }, 422);
   const input = validation.value;
+  if (input.clear_discord_webhook) {
+    return context.json({ error: "clear_discord_webhook_requires_existing_job" }, 422);
+  }
   const referencesValid = await validateReferences(context.env.DB, input);
   if (!referencesValid) return context.json({ error: "invalid_host_or_repository_reference" }, 422);
 
@@ -204,10 +211,14 @@ api.put("/jobs/:jobId", async (context) => {
     const statements = [
       context.env.DB.prepare(
         `UPDATE jobs SET slug = ?, name = ?, description = ?, operation = ?,
-           max_runtime_seconds = ?, discord_enabled = ?, enabled = ?, updated_at = ? WHERE id = ?`,
+           max_runtime_seconds = ?, discord_enabled = ?,
+           discord_webhook_url = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN NULL ELSE discord_webhook_url END,
+           enabled = ?, updated_at = ? WHERE id = ?`,
       ).bind(
         slug, input.name.trim(), input.description ?? "", input.operation,
         input.max_runtime_seconds, input.discord_enabled === false ? 0 : 1,
+        input.discord_webhook_url !== undefined ? 1 : 0, input.discord_webhook_url ?? null,
+        input.clear_discord_webhook === true ? 1 : 0,
         input.enabled === false ? 0 : 1, now, jobId,
       ),
       context.env.DB.prepare("DELETE FROM job_tags WHERE job_id = ?").bind(jobId),
@@ -293,6 +304,24 @@ function validateJob(value: unknown): { ok: true; value: JobInput } | { ok: fals
   if (item.discord_enabled !== undefined && typeof item.discord_enabled !== "boolean") {
     return { ok: false, error: "invalid_discord_enabled" };
   }
+  if (item.clear_discord_webhook !== undefined && typeof item.clear_discord_webhook !== "boolean") {
+    return { ok: false, error: "invalid_clear_discord_webhook" };
+  }
+  let discordWebhookUrl: string | undefined;
+  if (item.discord_webhook_url !== undefined) {
+    if (typeof item.discord_webhook_url !== "string" || item.discord_webhook_url.length > 2048) {
+      return { ok: false, error: "invalid_discord_webhook_url" };
+    }
+    const value = item.discord_webhook_url.trim();
+    if (value) {
+      const normalized = normalizeDiscordWebhookUrl(value);
+      if (normalized === null) return { ok: false, error: "invalid_discord_webhook_url" };
+      discordWebhookUrl = normalized;
+    }
+  }
+  if (discordWebhookUrl !== undefined && item.clear_discord_webhook === true) {
+    return { ok: false, error: "discord_webhook_update_conflict" };
+  }
   if (item.enabled !== undefined && typeof item.enabled !== "boolean") return { ok: false, error: "invalid_enabled" };
   if (item.tags !== undefined && (!Array.isArray(item.tags) || item.tags.length > 32 || !item.tags.every((tag) => typeof tag === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(tag)))) {
     return { ok: false, error: "invalid_tags" };
@@ -349,6 +378,8 @@ function validateJob(value: unknown): { ok: true; value: JobInput } | { ok: fals
       operation: item.operation,
       max_runtime_seconds: Number(item.max_runtime_seconds),
       discord_enabled: item.discord_enabled !== false,
+      discord_webhook_url: discordWebhookUrl,
+      clear_discord_webhook: item.clear_discord_webhook === true,
       enabled: item.enabled !== false,
       tags: [...new Set(((item.tags as string[] | undefined) ?? []).map((tag) => tag.toLowerCase()))],
       repositories,
@@ -388,11 +419,12 @@ function jobStatements(db: D1Database, id: string, input: JobInput, slug: string
     db.prepare(
       `INSERT INTO jobs (
          id, host_id, slug, name, description, operation, max_runtime_seconds,
-         discord_enabled, enabled, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         discord_enabled, discord_webhook_url, enabled, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       id, input.host_id, slug, input.name.trim(), input.description ?? "", input.operation,
       input.max_runtime_seconds, input.discord_enabled === false ? 0 : 1,
+      input.discord_webhook_url ?? null,
       input.enabled === false ? 0 : 1, now, now,
     ),
     ...jobRelationStatements(db, id, input, now),
@@ -431,6 +463,7 @@ function shapeJob(row: Record<string, unknown>) {
     ...row,
     enabled: row.enabled === 1,
     discord_enabled: row.discord_enabled === 1,
+    discord_webhook_configured: row.discord_webhook_configured === 1,
     tags: safeJsonArray(row.tags_json),
     schedules: safeJsonArray(row.schedules_json),
     repositories: safeJsonArray(row.repositories_json),

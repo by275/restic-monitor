@@ -29,7 +29,7 @@ Read the [client protocol v1](docs/client-protocol.md), [dashboard read API](doc
 
 ## Alerts and deployment
 
-Discord delivery stays pending until `DISCORD_WEBHOOK_URL` is configured as a Cloudflare Secret. For local use, put it in the gitignored `.dev.vars` file next to `wrangler.jsonc`.
+Each Job has its own optional Discord webhook URL. Enter it in the Job form; on edit, leave the field blank to keep the current URL, enter a new URL to replace it, or select the removal checkbox. The dashboard shows whether a URL is configured but does not return its current value in the Job list API. Alerts remain pending until that Job has a webhook and Discord notifications are enabled.
 
 For deployment, protect the dashboard hostname with Cloudflare Access and set `ADMIN_HOST` to that hostname. Set `PING_BASE_URL` to a separate public hostname such as `https://ingest.example.com`; the generated URL must not point at the Access-protected dashboard host. The public ping routes authenticate with each Job's capability URL. See [Cloudflare Access and hostname setup](docs/cloudflare-access.md).
 

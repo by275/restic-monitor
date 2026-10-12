@@ -24,6 +24,7 @@
 - 같은 작업의 여러 cron 규칙은 한 Job에 연결할 수 있다. 일정 종류 모델은 확장 가능하게 두되 초기 구현은 표준 5-field cron과 IANA timezone만 평가한다.
 - 시작 지연 유예와 최대 실행 시간은 별도 설정한다.
 - Worker Cron은 Restic을 실행하지 않는다. 예정 실행 누락, 실행 timeout, Discord outbox 재시도를 처리한다.
+- Discord webhook URL은 각 Job에 선택적으로 저장한다. Job 수정에서 빈 값은 기존 URL 유지, 새 URL은 교체, 삭제 체크는 URL 제거를 의미한다. API 목록 응답은 URL 원문 대신 설정 여부만 반환한다.
 - 기존 exit code 상태 매핑과 Repository stats 이상 감지를 유지한다. backend 물리 사용량을 Restic 통계로 추정하지 않는다.
 
 ## 검증과 변경

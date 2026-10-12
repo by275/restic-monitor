@@ -17,10 +17,10 @@ export default {
   fetch: (request: Request, env: Env, context: ExecutionContext) => app.fetch(request, env, context),
   scheduled: async (
     _controller: ScheduledController,
-    env: Env & { DISCORD_WEBHOOK_URL?: string },
+    env: Env,
     _context: ExecutionContext,
   ) => {
     await runScheduleTick(env.DB, Date.now());
-    await runNotificationTick(env.DB, env.DISCORD_WEBHOOK_URL, Date.now());
+    await runNotificationTick(env.DB, Date.now());
   },
 };

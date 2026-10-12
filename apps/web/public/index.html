@@ -224,6 +224,8 @@
                 <label class="wide-field">설명 <textarea name="description" maxlength="2000" rows="2"></textarea></label>
                 <label class="wide-field">Cron 규칙 <textarea name="schedules" required rows="3">0 3 * * *|Asia/Seoul|600</textarea><small>한 줄에 하나씩: <code>cron 표현식|시간대|시작 유예 초</code></small></label>
                 <label class="check-field"><input name="discord_enabled" type="checkbox" checked> Discord 알림 사용</label>
+                <label class="wide-field">Discord Webhook URL <input name="discord_webhook_url" type="url" maxlength="2048" placeholder="https://discord.com/api/webhooks/..."><small id="discord-webhook-help">작업별로 알림을 보낼 Discord 채널을 지정합니다. 수정할 때 비워 두면 기존 URL을 유지하고, 새 URL을 입력하면 교체합니다.</small></label>
+                <label class="check-field"><input name="clear_discord_webhook" type="checkbox" disabled> 저장된 Webhook URL 삭제</label>
                 <label class="check-field"><input name="enabled" type="checkbox" checked> 작업 활성화</label>
               </div>
               <button class="button button-primary" type="submit">작업 저장</button>

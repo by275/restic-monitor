@@ -1,5 +1,22 @@
 # Cloudflare Access and hostname setup
 
+## Cloudflare components in this project
+
+| Component | Use here | State |
+|---|---|---|
+| Workers | Runs the API and request router | Configured in `wrangler.jsonc`; not deployed |
+| Workers Static Assets | Serves the dashboard HTML, CSS, and JavaScript from the Worker deployment | Configured in `wrangler.jsonc` |
+| D1 | Stores Hosts, Repositories, Jobs, runs, alerts, notification deliveries, and per-Job Discord webhook URLs | Local database is tested; production database is not created |
+| Cron Triggers | Every five minutes, evaluates missed schedules and timeouts, then drains the Discord outbox | One `*/5 * * * *` trigger is configured; not deployed |
+| Worker variables | `ADMIN_HOST` restricts admin/read routes by hostname; `PING_BASE_URL` builds client ping URLs | Local `ADMIN_HOST` configured; production values are operator setup |
+| Cloudflare Access | Protects the dashboard and admin/read API hostname | Recommended deployment setup; no Access application is configured here |
+| Custom Domains and DNS | Route the dashboard and public ping hostname to this Worker | Required for the documented two-hostname deployment; not configured here |
+| Edge rate limiting | Limits public ping traffic before it reaches the Worker | Recommended before exposing the ping hostname; not configured here |
+
+The application does not currently use Queues, KV, R2, Durable Objects, or Workers AI. Wrangler is the local development, D1 schema, and deployment CLI rather than a runtime service. The current plan limits are listed below and should be rechecked before production deployment.
+
+Discord itself is an external service. The Worker sends webhook HTTP requests from the notification outbox; each Job's webhook URL is stored in its D1 row and can be replaced or removed in the Job form. No Worker-wide `DISCORD_WEBHOOK_URL` secret is required.
+
 The web UI and admin API are for operators. Protect their hostname with Cloudflare Access. Restic clients cannot complete an Access login, so send pings to a separate public hostname and authenticate them with the per-Job ping URL.
 
 ## Hostnames
@@ -34,9 +51,8 @@ This is a low-volume, Free-first design, not a guarantee that every backup fleet
 2. Apply the clean baseline schema to the remote database with `wrangler d1 migrations apply restic-monitor --remote` after checking the configured database name and ID.
 3. Set `ADMIN_HOST` and `PING_BASE_URL` as Worker variables. Attach both custom domains to the Worker.
 4. Protect `monitor.example.com` with Access; leave `ingest.example.com` reachable to clients and configure edge rate limiting there.
-5. Add `DISCORD_WEBHOOK_URL` with `wrangler secret put DISCORD_WEBHOOK_URL` if Discord delivery is wanted.
-6. Create one Host, Repository, and Job per independently scheduled Restic command in the UI. Save each one-time ping URL securely on its client.
-7. Verify a synthetic start/completion request against the deployed Worker, then confirm the run and alert in the dashboard. Do not test against a production Restic repository during initial setup.
+5. Create one Host, Repository, and Job per independently scheduled Restic command in the UI. Add an optional Discord webhook URL to each Job and save each one-time ping URL on its client.
+6. Verify a synthetic start/completion request against the deployed Worker, then confirm the run and alert in the dashboard. Do not test against a production Restic repository during initial setup.
 
 Never run `db:reset:local` for a remote database. That command is deliberately hard-coded to local Wrangler D1.
 

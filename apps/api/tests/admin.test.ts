@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const adminBase = "http://localhost/api/v1/admin";
 const hostId = crypto.randomUUID();
 const repositoryId = crypto.randomUUID();
+const webhookUrl = "https://discord.com/api/webhooks/123456789012345678/test-webhook-token";
 
 async function post(path: string, value: unknown) {
   return exports.default.fetch(`${adminBase}${path}`, {
@@ -39,6 +40,7 @@ describe("admin configuration API", () => {
       operation: "backup",
       max_runtime_seconds: 7200,
       discord_enabled: true,
+      discord_webhook_url: webhookUrl,
       tags: ["production", "restic"],
       repositories: [{ repository_id: repositoryId, role: "repository" }],
       schedules: [
@@ -68,7 +70,11 @@ describe("admin configuration API", () => {
     expect(job.tags).toEqual(["production", "restic"]);
     expect(job.schedules).toHaveLength(2);
     expect(job.repositories).toMatchObject([{ repository_id: repositoryId, role: "repository" }]);
+    expect(job.discord_webhook_configured).toBe(true);
     expect(JSON.stringify(job)).not.toContain(token);
+    expect(JSON.stringify(job)).not.toContain(webhookUrl);
+    expect(await env.DB.prepare("SELECT discord_webhook_url FROM jobs WHERE id = ?")
+      .bind(created.id).first()).toEqual({ discord_webhook_url: `${webhookUrl}?wait=true` });
 
     const duplicate = await post("/jobs", {
       host_id: hostId,
@@ -80,6 +86,16 @@ describe("admin configuration API", () => {
       schedules: [{ schedule_type: "cron", expression: "0 3 * * *", timezone: "UTC", start_grace_seconds: 0 }],
     });
     expect(duplicate.status).toBe(409);
+    const invalidWebhook = await post("/jobs", {
+      host_id: hostId,
+      name: "Invalid webhook",
+      operation: "backup",
+      max_runtime_seconds: 600,
+      discord_webhook_url: "https://attacker.example/webhook",
+      repositories: [{ repository_id: repositoryId, role: "repository" }],
+      schedules: [{ schedule_type: "cron", expression: "0 3 * * *", timezone: "UTC", start_grace_seconds: 0 }],
+    });
+    expect(invalidWebhook.status).toBe(422);
   });
 
   it("rejects invalid schedule and an operation with the wrong repository role", async () => {
@@ -148,22 +164,51 @@ describe("admin configuration API", () => {
       name: "Disabled Job",
       max_runtime_seconds: 900,
       discord_enabled: false,
+      discord_webhook_url: webhookUrl,
       enabled: false,
       tags: ["maintenance", "nightly"],
       schedules: [{ ...input.schedules[0], expression: "30 5 * * *", start_grace_seconds: 120 }],
     });
     expect(updated.status).toBe(200);
     expect(await env.DB.prepare(
-      "SELECT host_id, name, enabled, discord_enabled, max_runtime_seconds FROM jobs WHERE id = ?",
+      "SELECT host_id, name, enabled, discord_enabled, discord_webhook_url, max_runtime_seconds FROM jobs WHERE id = ?",
     ).bind(id).first()).toEqual({
       host_id: localHostId,
       name: "Disabled Job",
       enabled: 0,
       discord_enabled: 0,
+      discord_webhook_url: `${webhookUrl}?wait=true`,
       max_runtime_seconds: 900,
     });
     expect(await env.DB.prepare("SELECT tag FROM job_tags WHERE job_id = ? ORDER BY tag")
       .bind(id).all()).toMatchObject({ results: [{ tag: "maintenance" }, { tag: "nightly" }] });
+
+    const keepWebhook = await put(`/jobs/${id}`, {
+      ...input,
+      name: "Keep webhook",
+      discord_enabled: false,
+      enabled: false,
+    });
+    expect(keepWebhook.status).toBe(200);
+    expect(await env.DB.prepare("SELECT discord_webhook_url FROM jobs WHERE id = ?")
+      .bind(id).first()).toEqual({ discord_webhook_url: `${webhookUrl}?wait=true` });
+
+    const clearWebhook = await put(`/jobs/${id}`, {
+      ...input,
+      discord_enabled: false,
+      enabled: false,
+      clear_discord_webhook: true,
+    });
+    expect(clearWebhook.status).toBe(200);
+    expect(await env.DB.prepare("SELECT discord_webhook_url FROM jobs WHERE id = ?")
+      .bind(id).first()).toEqual({ discord_webhook_url: null });
+
+    const conflictingWebhookUpdate = await put(`/jobs/${id}`, {
+      ...input,
+      discord_webhook_url: webhookUrl,
+      clear_discord_webhook: true,
+    });
+    expect(conflictingWebhookUpdate.status).toBe(422);
     const token = new URL(ping_url).pathname.split("/").at(-1)!;
     expect((await exports.default.fetch(
       `http://localhost/api/v1/ping/${token}/runs/${crypto.randomUUID()}/start`,

@@ -171,7 +171,7 @@ function renderAdminJobs() {
     info.append(node("span", "admin-job-name", `${job.name} · ${job.host_name}`));
     const schedule = job.schedules.map((item) => `${item.expression} (${item.timezone}, grace ${item.start_grace_seconds}s)`).join(" · ");
     const repos = job.repositories.map((item) => item.repository_key).join(", ");
-    info.append(node("span", "admin-job-sub", `${job.slug} · ${job.operation} · ${repos} · ${schedule} · ${job.enabled ? "활성" : "비활성"}`));
+    info.append(node("span", "admin-job-sub", `${job.slug} · ${job.operation} · ${repos} · ${schedule} · ${job.enabled ? "활성" : "비활성"} · Discord webhook ${job.discord_webhook_configured ? "설정됨" : "미설정"}`));
     const actions = node("div", "admin-job-actions");
     const edit = node("button", "button button-quiet", "수정");
     edit.type = "button";
@@ -202,6 +202,12 @@ function editJob(job) {
     `${item.expression}|${item.timezone}|${item.start_grace_seconds}`,
   ).join("\n");
   form.elements.namedItem("discord_enabled").checked = job.discord_enabled;
+  form.elements.namedItem("discord_webhook_url").value = "";
+  form.elements.namedItem("clear_discord_webhook").checked = false;
+  form.elements.namedItem("clear_discord_webhook").disabled = !job.discord_webhook_configured;
+  document.querySelector("#discord-webhook-help").textContent = job.discord_webhook_configured
+    ? "현재 Webhook 설정됨. 비워 두면 유지하고, 새 URL을 입력하면 교체합니다. URL을 삭제하려면 아래 항목을 선택하세요."
+    : "현재 Webhook 미설정. 새 URL을 입력하면 이 작업에 등록합니다.";
   form.elements.namedItem("enabled").checked = job.enabled;
   renderJobRepositoryFields(job.repositories);
   form.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -216,6 +222,10 @@ function resetJobForm() {
   document.querySelector("#cancel-job-edit").hidden = true;
   form.elements.namedItem("max_runtime_seconds").value = "14400";
   form.elements.namedItem("schedules").value = "0 3 * * *|Asia/Seoul|600";
+  form.elements.namedItem("discord_webhook_url").value = "";
+  form.elements.namedItem("clear_discord_webhook").checked = false;
+  form.elements.namedItem("clear_discord_webhook").disabled = true;
+  document.querySelector("#discord-webhook-help").textContent = "작업별로 알림을 보낼 Discord 채널을 지정합니다.";
   renderAdminHostOptions("");
   renderJobRepositoryFields();
 }
@@ -243,6 +253,8 @@ function jobFormPayload(form) {
     max_runtime_seconds: Number(value("max_runtime_seconds")),
     tags: value("tags").split(",").map((tag) => tag.trim()).filter(Boolean),
     discord_enabled: form.elements.namedItem("discord_enabled").checked,
+    discord_webhook_url: value("discord_webhook_url") || undefined,
+    clear_discord_webhook: form.elements.namedItem("clear_discord_webhook").checked,
     enabled: form.elements.namedItem("enabled").checked,
     repositories: [...form.querySelectorAll("select[data-role]")].map((select) => ({
       repository_id: select.value,
@@ -617,6 +629,12 @@ document.querySelector("#copy-ping-url").addEventListener("click", async () => {
 document.querySelector("#reload-admin").addEventListener("click", () => loadManagement().catch((error) => showAdminMessage(error.message, true)));
 document.querySelector("#job-operation").addEventListener("change", () => renderJobRepositoryFields());
 document.querySelector("#cancel-job-edit").addEventListener("click", resetJobForm);
+document.querySelector('[name="discord_webhook_url"]').addEventListener("input", (event) => {
+  if (event.currentTarget.value.trim()) document.querySelector('[name="clear_discord_webhook"]').checked = false;
+});
+document.querySelector('[name="clear_discord_webhook"]').addEventListener("change", (event) => {
+  if (event.currentTarget.checked) document.querySelector('[name="discord_webhook_url"]').value = "";
+});
 
 document.querySelector("#host-form").addEventListener("submit", async (event) => {
   event.preventDefault();

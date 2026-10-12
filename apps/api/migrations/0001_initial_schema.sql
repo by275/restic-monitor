@@ -26,6 +26,7 @@ CREATE TABLE jobs (
   operation TEXT NOT NULL CHECK (operation IN ('backup', 'forget', 'prune', 'forget_prune', 'copy', 'stats', 'check', 'restore')),
   max_runtime_seconds INTEGER NOT NULL CHECK (max_runtime_seconds BETWEEN 1 AND 31536000),
   discord_enabled INTEGER NOT NULL DEFAULT 1 CHECK (discord_enabled IN (0, 1)),
+  discord_webhook_url TEXT CHECK (discord_webhook_url IS NULL OR length(discord_webhook_url) BETWEEN 1 AND 2048),
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
