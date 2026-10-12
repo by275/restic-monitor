@@ -2,59 +2,246 @@ openapi: 3.1.0
 info:
   title: Restic Monitor API
   version: 1.0.0
-  description: Versioned event ingestion contract. Read-only dashboard endpoints are documented in docs/read-api.md and require Cloudflare Access protection on the configured dashboard hostname.
+  description: Job registration, execution pings, and read-only dashboard API.
 servers:
   - url: https://monitor.example.invalid
 paths:
-  /api/v1/ingest/events:
+  /api/v1/ping/{ping_token}/runs/{run_id}/start:
+    parameters:
+      - $ref: '#/components/parameters/PingToken'
+      - $ref: '#/components/parameters/RunId'
     post:
-      operationId: ingestEvent
-      summary: Submit one idempotent run event
-      security:
-        - bearerAuth: []
+      operationId: startRun
+      summary: Record the start of one Job run
+      description: The request has no body. Repeating the same Job/run ID does not change the original server timestamp.
+      responses:
+        '200':
+          description: Start accepted or already recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PingResponse' }
+        '400': { description: Invalid run ID or unexpected request body }
+        '401': { description: Unknown or revoked ping token }
+        '409': { description: Run ID belongs to a different Job }
+        '429': { description: Optional Cloudflare edge rate limit; retry after Retry-After }
+        '503': { description: Temporary service failure; retry the same request }
+  /api/v1/ping/{ping_token}/runs/{run_id}/complete:
+    parameters:
+      - $ref: '#/components/parameters/PingToken'
+      - $ref: '#/components/parameters/RunId'
+    post:
+      operationId: completeRun
+      summary: Record Restic's exit result and optional summary metrics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CompletionV1' }
+            examples:
+              backup:
+                summary: Backup completion with selected summary metrics
+                externalValue: './examples/complete.backup.json'
+              stats:
+                summary: Repository stats completion
+                externalValue: './examples/complete.stats.json'
+      responses:
+        '200':
+          description: Completion accepted or identical completion already recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PingResponse' }
+        '400': { description: Malformed JSON }
+        '401': { description: Unknown or revoked ping token }
+        '404': { description: Resource not found }
+        '409': { description: A different completion was already recorded for this run }
+        '413': { description: Request body exceeds 65,536 bytes }
+        '415': { description: Content-Type must be application/json }
+        '422': { description: Completion body does not satisfy v1 contract or Job settings }
+        '429': { description: Rate limited; retry after Retry-After }
+        '503': { description: Temporary service failure; retry the same URL and body }
+  /api/v1/admin/hosts:
+    get:
+      operationId: listHostsForAdmin
+      summary: List registered hosts (dashboard hostname and Access required)
+      responses:
+        '200': { description: Host inventory }
+        '404': { description: Request hostname is not the configured admin hostname }
+    post:
+      operationId: createHost
+      summary: Register a host
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/EventV1'
-            examples:
-              started:
-                summary: A run has started
-                externalValue: './examples/run.started.json'
-              completed:
-                summary: A run has completed
-                externalValue: './examples/run.completed.json'
-              repositoryStats:
-                summary: A successful Restic Repository stats measurement
-                externalValue: './examples/run.stats.completed.json'
+              type: object
+              required: [name, display_name]
+              properties:
+                name: { type: string, maxLength: 128 }
+                display_name: { type: string, maxLength: 128 }
       responses:
-        '200':
-          description: Event accepted or previously accepted with the same payload hash
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [event_id, accepted, duplicate, received_at]
-                properties:
-                  event_id: { type: string }
-                  accepted: { type: boolean }
-                  duplicate: { type: boolean }
-                  received_at: { type: string, format: date-time }
-        '400': { description: Malformed JSON }
-        '401': { description: Missing or invalid bearer token }
-        '403': { description: Token is not authorized for this event scope }
-        '409': { description: Event identifier reused with different content or conflicting completion }
-        '413': { description: Request body exceeds the configured limit }
-        '415': { description: Content-Type must be application/json }
-        '422': { description: Event does not satisfy the v1 contract }
-        '429': { description: Rate limited; client may retry after Retry-After }
-        '5XX': { description: Temporary service failure; client may retry the same event }
+        '201': { description: Host created }
+        '409': { description: Host name already exists }
+  /api/v1/admin/repositories:
+    get:
+      operationId: listRepositoriesForAdmin
+      summary: List registered repositories
+      responses:
+        '200': { description: Repository inventory }
+    post:
+      operationId: createRepository
+      summary: Register a repository (credentials remain on the client)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repository_key, name, backend_type]
+              properties:
+                repository_key: { type: string, pattern: '^[A-Za-z0-9._-]{1,128}$' }
+                name: { type: string, maxLength: 128 }
+                backend_type: { type: string, enum: [local, sftp, rest, s3, b2, azure, gs, other] }
+      responses:
+        '201': { description: Repository created }
+        '409': { description: Repository key already exists }
+  /api/v1/admin/jobs:
+    get:
+      operationId: listJobsForAdmin
+      summary: List Job configuration without returning ping secrets
+      responses:
+        '200': { description: Jobs with tags, schedules, and repository associations }
+    post:
+      operationId: createJob
+      summary: Create a Job and return its ping URL once
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobConfiguration' }
+      responses:
+        '201': { description: Job created; response includes one-time ping_url }
+        '422': { description: Invalid Job, schedule, or inventory association }
+        '503': { description: PING_BASE_URL is missing or unsafe }
+  /api/v1/admin/jobs/{job_id}:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    put:
+      operationId: updateJob
+      summary: Update Job configuration; Host association is immutable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobConfiguration' }
+      responses:
+        '200': { description: Job updated }
+        '409': { description: Host association cannot change or slug conflicts }
+        '422': { description: Invalid Job configuration }
+  /api/v1/admin/jobs/{job_id}/rotate-ping-token:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    post:
+      operationId: rotateJobPingToken
+      summary: Revoke the current token and return a new ping URL once
+      responses:
+        '200': { description: New ping_url; previous URL is revoked }
+        '404': { description: Job not found }
+        '503': { description: PING_BASE_URL is missing or unsafe }
+  /api/v1/read/overview:
+    get:
+      operationId: readOverview
+      summary: Read dashboard overview
+      responses:
+        '200': { description: Dashboard summary }
+        '404': { description: Request hostname is not the configured dashboard hostname }
+  /api/v1/read/runs:
+    get:
+      operationId: readRuns
+      summary: Read paginated run history
+      responses:
+        '200': { description: Paginated run history }
+        '404': { description: Request hostname is not the configured dashboard hostname }
+  /api/v1/read/hosts:
+    get:
+      operationId: readHosts
+      summary: Read host inventory
+      responses:
+        '200': { description: Host inventory }
+        '404': { description: Request hostname is not the configured dashboard hostname }
+  /api/v1/read/repositories:
+    get:
+      operationId: readRepositories
+      summary: Read repository inventory
+      responses:
+        '200': { description: Repository inventory }
+        '404': { description: Request hostname is not the configured dashboard hostname }
 components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
+  parameters:
+    PingToken:
+      name: ping_token
+      in: path
+      required: true
+      schema: { type: string, pattern: '^rmp1_[A-Za-z0-9_-]{43}$' }
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   schemas:
-    EventV1:
-      $ref: './schemas/event-v1.schema.json'
+    CompletionV1:
+      $ref: './schemas/completion-v1.schema.json'
+    PingResponse:
+      type: object
+      required: [run_id, accepted, duplicate, status, received_at]
+      properties:
+        run_id: { type: string, format: uuid }
+        accepted: { type: boolean }
+        duplicate: { type: boolean }
+        status:
+          type: string
+          enum: [running, success, partial_success, failed, timed_out, cancelled]
+        received_at: { type: string, format: date-time }
+    JobConfiguration:
+      type: object
+      required: [host_id, name, operation, max_runtime_seconds, repositories, schedules]
+      properties:
+        host_id: { type: string, format: uuid }
+        slug: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        name: { type: string, maxLength: 128 }
+        description: { type: string, maxLength: 2000 }
+        operation: { type: string, enum: [backup, forget, prune, forget_prune, copy, stats, check, restore] }
+        max_runtime_seconds: { type: integer, minimum: 1, maximum: 31536000 }
+        discord_enabled: { type: boolean, default: true }
+        enabled: { type: boolean, default: true }
+        tags:
+          type: array
+          maxItems: 32
+          items: { type: string, pattern: '^[a-zA-Z0-9_-]{1,64}$' }
+        repositories:
+          type: array
+          minItems: 1
+          maxItems: 2
+          items:
+            type: object
+            required: [repository_id, role]
+            properties:
+              repository_id: { type: string, format: uuid }
+              role: { type: string, enum: [repository, source, target] }
+        schedules:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            type: object
+            required: [schedule_type, expression, timezone, start_grace_seconds]
+            properties:
+              schedule_type: { const: cron }
+              expression: { type: string, description: Standard five-field cron expression }
+              timezone: { type: string, description: IANA timezone name }
+              start_grace_seconds: { type: integer, minimum: 0, maximum: 31536000 }

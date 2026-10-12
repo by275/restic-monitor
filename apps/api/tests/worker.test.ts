@@ -1,169 +1,91 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
+const TEST_HOST_ID = "00000000-0000-4000-8000-000000000001";
+const TEST_REPOSITORY_ID = "00000000-0000-4000-8000-000000000002";
+const TEST_JOB_ID = "00000000-0000-4000-8000-000000000003";
+const TEST_SCHEDULE_ID = "00000000-0000-4000-8000-000000000004";
+const TEST_RUN_ID = "00000000-0000-4000-8000-000000000005";
+
 describe("worker foundation", () => {
   it("returns a minimal health response", async () => {
     const response = await exports.default.fetch("http://localhost/healthz");
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("application/json");
-    await expect(response.json()).resolves.toEqual({
-      ok: true,
-      service: "restic-monitor",
-    });
+    await expect(response.json()).resolves.toEqual({ ok: true, service: "restic-monitor" });
   });
 
-  it("applies the initial D1 schema and enforces relational constraints", async () => {
+  it("applies the fresh Job-centric D1 schema and enforces its key constraints", async () => {
     const now = 1_798_000_000_000;
-    const hostId = "host-test";
-    const repoId = "repo-test";
-    const jobId = "job-test";
-
     await env.DB.prepare(
-      "INSERT INTO hosts (id, name, display_name, created_at) VALUES (?, ?, ?, ?)",
-    )
-      .bind(hostId, "test-host", "Test Host", now)
-      .run();
+      "INSERT INTO hosts (id, name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(TEST_HOST_ID, "test-host", "Test Host", now, now).run();
     await env.DB.prepare(
-      "INSERT INTO repositories (id, repository_key, name, backend_type, created_at) VALUES (?, ?, ?, ?, ?)",
-    )
-      .bind(repoId, "repo-test", "Test Repository", "s3", now)
-      .run();
+      `INSERT INTO repositories (id, repository_key, name, backend_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(TEST_REPOSITORY_ID, "repo-test", "Test Repository", "s3", now, now).run();
     await env.DB.prepare(
-      "INSERT INTO repositories (id, repository_key, name, backend_type, created_at) VALUES (?, ?, ?, ?, ?)",
-    )
-      .bind("repo-target", "repo-target", "Target Repository", "rest", now)
-      .run();
+      `INSERT INTO jobs (
+         id, host_id, slug, name, operation, max_runtime_seconds, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'backup', 3600, ?, ?)`,
+    ).bind(TEST_JOB_ID, TEST_HOST_ID, "daily-backup", "Daily backup", now, now).run();
     await env.DB.prepare(
-      "INSERT INTO jobs (id, host_id, job_key, name, schedule, timezone, grace_seconds, timeout_seconds, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-      .bind(jobId, hostId, "daily", "Daily backup", "0 5 * * *", "Asia/Seoul", 600, 7200, now)
-      .run();
+      "INSERT INTO job_tags (job_id, tag) VALUES (?, ?)",
+    ).bind(TEST_JOB_ID, "production").run();
     await env.DB.prepare(
-      "INSERT INTO job_repositories (job_id, repository_id, role) VALUES (?, ?, ?)",
-    )
-      .bind(jobId, repoId, "repository")
-      .run();
+      "INSERT INTO job_repositories (job_id, repository_id, role) VALUES (?, ?, 'repository')",
+    ).bind(TEST_JOB_ID, TEST_REPOSITORY_ID).run();
     await env.DB.prepare(
-      "INSERT INTO job_repositories (job_id, repository_id, role) VALUES (?, ?, ?)",
-    )
-      .bind(jobId, repoId, "source")
-      .run();
+      `INSERT INTO job_schedule_rules (
+         id, job_id, schedule_type, expression, timezone, start_grace_seconds, created_at, updated_at
+       ) VALUES (?, ?, 'cron', '0 3 * * *', 'Asia/Seoul', 300, ?, ?)`,
+    ).bind(TEST_SCHEDULE_ID, TEST_JOB_ID, now, now).run();
     await env.DB.prepare(
-      "INSERT INTO job_repositories (job_id, repository_id, role) VALUES (?, ?, ?)",
-    )
-      .bind(jobId, "repo-target", "target")
-      .run();
+      `INSERT INTO job_ping_tokens (id, job_id, token_prefix, token_hash, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind("00000000-0000-4000-8000-000000000006", TEST_JOB_ID, "rmp1_test", "a".repeat(64), now).run();
 
     await expect(
       env.DB.prepare(
-        "INSERT INTO jobs (id, host_id, job_key, name, schedule, timezone, timeout_seconds, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-        .bind("job-duplicate", hostId, "daily", "Duplicate", "0 6 * * *", "UTC", 3600, now)
-        .run(),
+        `INSERT INTO jobs (
+           id, host_id, slug, name, operation, max_runtime_seconds, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'backup', 3600, ?, ?)`,
+      ).bind("00000000-0000-4000-8000-000000000007", TEST_HOST_ID, "daily-backup", "Duplicate", now, now).run(),
     ).rejects.toThrow();
-
     await expect(
       env.DB.prepare(
-        "INSERT INTO jobs (id, host_id, job_key, name, schedule, timezone, timeout_seconds, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-        .bind("job-orphan", "missing-host", "orphan", "Orphan", "0 6 * * *", "UTC", 3600, now)
-        .run(),
+        `INSERT INTO job_ping_tokens (id, job_id, token_prefix, token_hash, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).bind("00000000-0000-4000-8000-000000000008", TEST_JOB_ID, "rmp1_next", "b".repeat(64), now).run(),
     ).rejects.toThrow();
-
     await expect(
       env.DB.prepare(
-        "INSERT INTO runs (id, job_id, operation, status, client_name, client_version, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-        .bind("run-bad-status", jobId, "backup", "unknown", "test-client", "0.1.0", now, now, now)
-        .run(),
+        `INSERT INTO runs (id, job_id, operation, status, started_at, created_at, updated_at)
+         VALUES (?, ?, 'backup', 'unknown', ?, ?, ?)`,
+      ).bind(TEST_RUN_ID, TEST_JOB_ID, now, now, now).run(),
     ).rejects.toThrow();
-
-    await expect(
-      env.DB.prepare(
-        "INSERT INTO runs (id, job_id, operation, status, client_name, client_version, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-        .bind("run-bad-operation", jobId, "unknown", "running", "test-client", "0.1.0", now, now, now)
-        .run(),
-    ).rejects.toThrow();
-
-    await env.DB.prepare(
-      "INSERT INTO runs (id, job_id, operation, status, client_name, client_version, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-      .bind("run-test", jobId, "backup", "running", "test-client", "0.1.0", now, now, now)
-      .run();
-    await env.DB.prepare(
-      "INSERT INTO run_repositories (run_id, repository_id, role) VALUES (?, ?, ?)",
-    )
-      .bind("run-test", repoId, "repository")
-      .run();
-    await env.DB.prepare(
-      "INSERT INTO run_metrics (run_id, bytes_added, updated_at) VALUES (?, ?, ?)",
-    )
-      .bind("run-test", 4096, now)
-      .run();
-
     await expect(
       env.DB.prepare(
         "INSERT INTO run_metrics (run_id, bytes_added, updated_at) VALUES (?, ?, ?)",
-      )
-        .bind("run-test", 9007199254740992, now)
-        .run(),
+      ).bind(TEST_RUN_ID, 9007199254740992, now).run(),
     ).rejects.toThrow();
 
-    const tokenHash = "a".repeat(64);
-    const payloadHash = "b".repeat(64);
     await env.DB.prepare(
-      "INSERT INTO api_tokens (id, host_id, token_prefix, token_hash, scopes_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-      .bind("token-test", hostId, "rm_test", tokenHash, '["ingest"]', now)
-      .run();
+      `INSERT INTO runs (
+         id, job_id, operation, status, started_at, start_ping_received, created_at, updated_at
+       ) VALUES (?, ?, 'backup', 'running', ?, 1, ?, ?)`,
+    ).bind(TEST_RUN_ID, TEST_JOB_ID, now, now, now).run();
     await env.DB.prepare(
-      "INSERT INTO ingest_events (token_id, event_id, run_id, event_type, payload_hash, received_at) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-      .bind("token-test", "event-test", "run-test", "run.started", payloadHash, now)
-      .run();
-
-    await expect(
-      env.DB.prepare(
-        "INSERT INTO ingest_events (token_id, event_id, run_id, event_type, payload_hash, received_at) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-        .bind("token-test", "event-test", "run-test", "run.started", payloadHash, now)
-        .run(),
-    ).rejects.toThrow();
-
-    await expect(
-      env.DB.prepare(
-        "INSERT INTO runs (id, job_id, operation, status, client_name, client_version, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-        .bind("run-incomplete", jobId, "backup", "failed", "test-client", "0.1.0", now, now, now)
-        .run(),
-    ).rejects.toThrow();
-
-    expect(
-      await env.DB.prepare("SELECT count(*) AS count FROM run_repositories WHERE run_id = ?")
-        .bind("run-test")
-        .first<{ count: number }>(),
-    ).toEqual({ count: 1 });
-
+      "INSERT INTO run_repositories (run_id, repository_id, role) VALUES (?, ?, 'repository')",
+    ).bind(TEST_RUN_ID, TEST_REPOSITORY_ID).run();
     await env.DB.prepare(
-      "INSERT INTO runs (id, job_id, operation, status, client_name, client_version, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-      .bind("run-copy", jobId, "copy", "running", "test-client", "0.1.0", now, now, now)
-      .run();
-    await env.DB.batch([
-      env.DB.prepare(
-        "INSERT INTO run_repositories (run_id, repository_id, role) VALUES (?, ?, ?)",
-      ).bind("run-copy", repoId, "source"),
-      env.DB.prepare(
-        "INSERT INTO run_repositories (run_id, repository_id, role) VALUES (?, ?, ?)",
-      ).bind("run-copy", "repo-target", "target"),
-    ]);
+      "INSERT INTO run_metrics (run_id, bytes_added, updated_at) VALUES (?, ?, ?)",
+    ).bind(TEST_RUN_ID, 4096, now).run();
 
-    expect(
-      await env.DB.prepare("SELECT role FROM run_repositories WHERE run_id = ? ORDER BY role")
-        .bind("run-copy")
-        .all<{ role: string }>(),
-    ).toMatchObject({ results: [{ role: "source" }, { role: "target" }] });
+    expect(await env.DB.prepare("SELECT slug FROM jobs WHERE id = ?").bind(TEST_JOB_ID).first())
+      .toEqual({ slug: "daily-backup" });
+    expect(await env.DB.prepare("SELECT count(*) AS count FROM run_repositories WHERE run_id = ?")
+      .bind(TEST_RUN_ID).first()).toEqual({ count: 1 });
   });
 });

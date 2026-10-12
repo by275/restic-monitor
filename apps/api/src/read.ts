@@ -31,7 +31,7 @@ const MEASUREMENT_TYPES = new Set([
 
 interface RunFilters {
   host_id: string | null;
-  job_key: string | null;
+  job_slug: string | null;
   repository_key: string | null;
   status: string | null;
   operation: string | null;
@@ -43,6 +43,7 @@ interface RunRow {
   operation: string;
   status: string;
   exit_code: number | null;
+  start_ping_received: number;
   started_at: number;
   finished_at: number | null;
   duration_ms: number | null;
@@ -51,7 +52,7 @@ interface RunRow {
   client_version: string;
   restic_version: string | null;
   job_id: string;
-  job_key: string;
+  job_slug: string;
   job_name: string;
   host_id: string;
   host_name: string;
@@ -103,10 +104,10 @@ interface RepositoryStatRow {
 }
 
 const runSelect = `
-  SELECT r.id, r.workflow_id, r.operation, r.status, r.exit_code,
+  SELECT r.id, r.workflow_id, r.operation, r.status, r.exit_code, r.start_ping_received,
          r.started_at, r.finished_at, r.duration_ms, r.error_summary,
          r.client_name, r.client_version, r.restic_version,
-         j.id AS job_id, j.job_key, j.name AS job_name,
+         j.id AS job_id, j.slug AS job_slug, j.name AS job_name,
          h.id AS host_id, h.name AS host_name, h.display_name AS host_display_name,
          COALESCE((
            SELECT json_group_array(json_object(
@@ -461,15 +462,15 @@ function parseRunFilters(
   includeStatus: boolean,
 ): { filters: RunFilters; error: string | null } {
   const hostId = params.get("host_id");
-  const jobKey = params.get("job_key");
+  const jobSlug = params.get("job_slug");
   const repositoryKey = params.get("repository_key");
   const status = params.get("status");
   const operation = params.get("operation");
   if (hostId !== null && (hostId.length < 1 || hostId.length > 128)) {
     return { filters: emptyRunFilters(), error: "invalid_host_id" };
   }
-  if (jobKey !== null && !/^[A-Za-z0-9._-]{1,128}$/.test(jobKey)) {
-    return { filters: emptyRunFilters(), error: "invalid_job_key" };
+  if (jobSlug !== null && !/^[a-z0-9-]{1,100}$/.test(jobSlug)) {
+    return { filters: emptyRunFilters(), error: "invalid_job_slug" };
   }
   if (repositoryKey !== null && !/^[A-Za-z0-9._-]{1,128}$/.test(repositoryKey)) {
     return { filters: emptyRunFilters(), error: "invalid_repository_key" };
@@ -483,7 +484,7 @@ function parseRunFilters(
   return {
     filters: {
       host_id: hostId,
-      job_key: jobKey,
+      job_slug: jobSlug,
       repository_key: repositoryKey,
       status,
       operation,
@@ -493,7 +494,7 @@ function parseRunFilters(
 }
 
 function emptyRunFilters(): RunFilters {
-  return { host_id: null, job_key: null, repository_key: null, status: null, operation: null };
+  return { host_id: null, job_slug: null, repository_key: null, status: null, operation: null };
 }
 
 function appendRunFilters(filters: RunFilters, clauses: string[], values: Array<string | number>) {
@@ -501,9 +502,9 @@ function appendRunFilters(filters: RunFilters, clauses: string[], values: Array<
     clauses.push("h.id = ?");
     values.push(filters.host_id);
   }
-  if (filters.job_key !== null) {
-    clauses.push("j.job_key = ?");
-    values.push(filters.job_key);
+  if (filters.job_slug !== null) {
+    clauses.push("j.slug = ?");
+    values.push(filters.job_slug);
   }
   if (filters.repository_key !== null) {
     clauses.push(`EXISTS (
@@ -618,6 +619,7 @@ function mapRun(row: RunRow, includeFullMetrics: boolean) {
     operation: row.operation,
     status: row.status,
     exit_code: row.exit_code,
+    start_ping_received: row.start_ping_received === 1,
     started_at: row.started_at,
     finished_at: row.finished_at,
     duration_ms: row.duration_ms,
@@ -627,7 +629,7 @@ function mapRun(row: RunRow, includeFullMetrics: boolean) {
       version: row.client_version,
       restic_version: row.restic_version,
     },
-    job: { id: row.job_id, key: row.job_key, name: row.job_name },
+    job: { id: row.job_id, slug: row.job_slug, name: row.job_name },
     host: { id: row.host_id, name: row.host_name, display_name: row.host_display_name },
     repositories,
   };

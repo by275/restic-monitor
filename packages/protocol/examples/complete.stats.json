@@ -1,0 +1,12 @@
+{
+  "exit_code": 0,
+  "restic_version": "0.19.1",
+  "repository_stats": {
+    "mode": "restore-size",
+    "value_bytes": 8192,
+    "total_file_count": 4,
+    "total_blob_count": 8,
+    "snapshots_count": 2,
+    "total_uncompressed_size": 16384
+  }
+}

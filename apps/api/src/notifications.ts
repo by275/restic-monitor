@@ -39,7 +39,8 @@ export function queueOpenNotifications(
      )
      SELECT lower(hex(randomblob(16))), a.id, ?, 'open', 'pending', 0, ?, ?, ?
      FROM alerts AS a
-     WHERE a.job_id = ? AND a.status = 'open'
+     INNER JOIN jobs AS j ON j.id = a.job_id
+     WHERE a.job_id = ? AND a.status = 'open' AND j.discord_enabled = 1
      ON CONFLICT(alert_id, channel_key, notification_type) DO NOTHING`,
   ).bind(DISCORD_CHANNEL, now, now, now, jobId);
 }
@@ -57,9 +58,32 @@ export function queueRecoveryNotification(
      )
      SELECT lower(hex(randomblob(16))), a.id, ?, 'recovery', 'pending', 0, ?, ?, ?
      FROM alerts AS a
+     INNER JOIN jobs AS j ON j.id = a.job_id
      WHERE a.dedupe_key = ? AND a.status = 'resolved' AND a.resolved_at = ?
+       AND j.discord_enabled = 1
      ON CONFLICT(alert_id, channel_key, notification_type) DO NOTHING`,
   ).bind(DISCORD_CHANNEL, resolvedAt, resolvedAt, resolvedAt, dedupeKey, resolvedAt);
+}
+
+/** Queue recovery notices for every alert resolved by one successful Job run. */
+export function queueResolvedJobNotifications(
+  db: D1Database,
+  jobId: string,
+  resolvedAt: number,
+  ruleKey: string,
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT INTO notification_deliveries (
+       id, alert_id, channel_key, notification_type, status, attempts,
+       next_attempt_at, created_at, updated_at
+     )
+     SELECT lower(hex(randomblob(16))), a.id, ?, 'recovery', 'pending', 0, ?, ?, ?
+     FROM alerts AS a
+     INNER JOIN jobs AS j ON j.id = a.job_id
+     WHERE a.job_id = ? AND a.rule_key = ? AND a.status = 'resolved'
+       AND a.resolved_at = ? AND j.discord_enabled = 1
+     ON CONFLICT(alert_id, channel_key, notification_type) DO NOTHING`,
+  ).bind(DISCORD_CHANNEL, resolvedAt, resolvedAt, resolvedAt, jobId, ruleKey, resolvedAt);
 }
 
 /**

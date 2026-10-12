@@ -1,0 +1,13 @@
+{
+  "exit_code": 0,
+  "restic_version": "0.19.1",
+  "metrics": {
+    "bytes_processed": 1570181939,
+    "bytes_added": 135926784,
+    "bytes_added_packed": 33018880,
+    "files_new": 7,
+    "files_changed": 2812,
+    "files_unmodified": 7459,
+    "snapshot_id": "4e066584"
+  }
+}
