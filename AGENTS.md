@@ -35,5 +35,7 @@
 - 각 구현 단계는 `docs/implementation-plan.md`의 완료 조건을 만족해야 한다.
 - 각 단계마다 mock 입력과 격리된 D1을 사용하는 테스트를 작성하고 실행한다. 실제 백업 저장소, 운영 endpoint, Docker host를 테스트에 요구하지 않는다.
 - Web UI는 Cloudflare Assets에서 제공하는 정적 HTML/JavaScript/CSS로 유지한다. SFPanel은 시각적 참고 자료로만 사용하고 소스 컴포넌트는 복사하지 않는다.
+- 배포 환경 값은 검증된 `DEPLOY_*` 입력으로 무시 가능한 `.wrangler.deploy.jsonc`를 만들어 Wrangler에 전달한다. 추적 중인 `wrangler.jsonc`는 로컬 기본값으로 유지하고, 알림 자격 증명이나 Job ping URL을 빌드 변수로 받지 않는다.
+- Cloudflare Workers Builds 배포 가이드와 Wrangler 설정을 함께 갱신한다. 새 `DEPLOY_*` 변수는 명시적인 검증과 테스트를 추가한 뒤 허용한다.
 - 단계 경계마다 Git commit을 만든다. 테스트 실패와 알려진 제한은 단계 완료 보고에 기록한다.
 - 공식 Restic JSON/exit code 또는 Cloudflare runtime 동작을 구현에 반영하기 전 공식 문서를 확인한다.

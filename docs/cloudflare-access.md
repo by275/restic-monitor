@@ -6,8 +6,8 @@
 |---|---|---|
 | Workers | Runs the API and request router | Configured in `wrangler.jsonc`; not deployed |
 | Workers Static Assets | Serves the dashboard HTML, CSS, and JavaScript from the Worker deployment | Configured in `wrangler.jsonc` |
-| D1 | Stores Hosts, Repositories, Jobs, runs, alerts, notification deliveries, and per-Job Discord webhook URLs | Local database is tested; production database is not created |
-| Cron Triggers | Every five minutes, evaluates missed schedules and timeouts, then drains the Discord outbox | One `*/5 * * * *` trigger is configured; not deployed |
+| D1 | Stores Hosts, Repositories, Jobs, runs, alerts, notification targets, and notification deliveries | Local database is tested; production database is not created |
+| Cron Triggers | Every five minutes, evaluates missed schedules and timeouts, then drains the notification outbox | One `*/5 * * * *` trigger is configured; not deployed |
 | Worker variables | `ADMIN_HOST` restricts admin/read routes by hostname; `PING_BASE_URL` builds client ping URLs | Local `ADMIN_HOST` configured; production values are operator setup |
 | Cloudflare Access | Protects the dashboard and admin/read API hostname | Recommended deployment setup; no Access application is configured here |
 | Custom Domains and DNS | Route the dashboard and public ping hostname to this Worker | Required for the documented two-hostname deployment; not configured here |
@@ -15,7 +15,7 @@
 
 The application does not currently use Queues, KV, R2, Durable Objects, or Workers AI. Wrangler is the local development, D1 schema, and deployment CLI rather than a runtime service. The current plan limits are listed below and should be rechecked before production deployment.
 
-Discord itself is an external service. The Worker sends webhook HTTP requests from the notification outbox; each Job's webhook URL is stored in its D1 row and can be replaced or removed in the Job form. No Worker-wide `DISCORD_WEBHOOK_URL` secret is required.
+Discord and Telegram are external services. Their connection details are registered as reusable notification targets in the dashboard and stored in D1. Jobs can select zero or more targets. No Worker-wide webhook or bot token is required.
 
 The web UI and admin API are for operators. Protect their hostname with Cloudflare Access. Restic clients cannot complete an Access login, so send pings to a separate public hostname and authenticate them with the per-Job ping URL.
 
@@ -47,12 +47,7 @@ This is a low-volume, Free-first design, not a guarantee that every backup fleet
 
 ## Production checklist
 
-1. Create a new Cloudflare D1 database and replace the placeholder `database_id` in `wrangler.jsonc` for the production configuration.
-2. Apply the clean baseline schema to the remote database with `wrangler d1 migrations apply restic-monitor --remote` after checking the configured database name and ID.
-3. Set `ADMIN_HOST` and `PING_BASE_URL` as Worker variables. Attach both custom domains to the Worker.
-4. Protect `monitor.example.com` with Access; leave `ingest.example.com` reachable to clients and configure edge rate limiting there.
-5. Create one Host, Repository, and Job per independently scheduled Restic command in the UI. Add an optional Discord webhook URL to each Job and save each one-time ping URL on its client.
-6. Verify a synthetic start/completion request against the deployed Worker, then confirm the run and alert in the dashboard. Do not test against a production Restic repository during initial setup.
+Follow the [Workers Builds deployment guide](cloudflare-workers-deploy.md) to create D1, configure `DEPLOY_*` build variables, apply the baseline schema, and deploy the generated Wrangler config. Protect the admin hostname with Access, leave the ping hostname reachable to clients, and configure edge rate limiting for ping traffic. Then create Hosts, Repositories, notification targets, and Jobs in the UI and verify a synthetic start/completion request before adapting a live schedule.
 
 Never run `db:reset:local` for a remote database. That command is deliberately hard-coded to local Wrangler D1.
 

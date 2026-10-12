@@ -1,6 +1,6 @@
 # Restic Monitor implementation plan
 
-- Status: Stages 1–10 implemented; Stage 11 remains
+- Status: Stages 1–11 implemented
 - API path version: v1 (no release or deployed client requires a protocol migration)
 - Database baseline: resettable development database; no existing-data backfill or compatibility migration is required
 - Scope: server-side Job configuration, ping API, schedule monitoring, reusable Discord/Telegram notification targets, dashboard, and small Bash/PowerShell examples
@@ -20,7 +20,7 @@
 | 8. Host/Repository edit, availability, and deletion controls | Complete | D1/API tests and browser smoke for registration, edit, hide/restore, and unused-resource deletion |
 | 9. Reusable Discord/Telegram notification targets | Complete | D1/API/outbox coverage for both providers; secret-safe responses; browser smoke for target registration and Job assignment/edit |
 | 10. SFPanel-inspired dashboard and admin UI refresh | Complete | Responsive navigation, clearer dashboard hierarchy, settings navigation, and desktop/mobile browser smoke; no direct SFPanel source reuse |
-| 11. `DEPLOY_*` Wrangler customization | Planned | Synthetic config generation tests and deployment guide |
+| 11. `DEPLOY_*` Wrangler customization | Complete | Validation tests and Wrangler dry-run with synthetic production config; Workers Builds deployment guide |
 
 `corepack pnpm test` and `corepack pnpm typecheck` pass: 13 protocol tests, 33 Worker/D1 tests, the synthetic Bash client test, and static JavaScript validation. Stage 9 browser smoke covered Discord and Telegram target registration, credential-free list responses, Job assignment and removal, and target options in the Job editor. Stage 10 browser smoke covered desktop layout, settings navigation, and a 390px mobile viewport with no horizontal page overflow. Cloudflare Access policy, production D1, deployed hostname routing, and edge rate limiting are operator configuration and have not been deployed or verified here. Timeout and missed-schedule detection run on the Worker Cron every five minutes, so alert detection can lag the configured boundary by up to one Cron interval.
 
@@ -146,9 +146,9 @@ The refresh adds a persistent section navigator on desktop, a compact responsive
 
 ### Stage 11 — `DEPLOY_*` Wrangler customization
 
-Add a deploy command that reads `DEPLOY_*` build variables, creates an ignored deployment-specific Wrangler config by overriding documented fields, validates required hostnames and D1 identifiers, and deploys with that generated config. Keep local development defaults in the tracked config. Provide Cloudflare Workers Builds build/deploy command setup and identify which values are build variables, Worker runtime variables, or D1 bindings. Do not place webhook or Telegram credentials in build variables.
+Add a deploy command that reads allow-listed `DEPLOY_*` build variables, creates an ignored deployment-specific Wrangler config by overriding documented fields, validates required hostnames and D1 identifiers, and deploys with that generated config. Keep local development defaults in the tracked config. Provide Cloudflare Workers Builds build/deploy command setup and identify which values are build variables, Worker runtime variables, or D1 bindings. Do not place webhook or Telegram credentials in build variables. The generator sets separate admin and ping custom domains, disables the `workers.dev` hostname, and sets `ADMIN_HOST`, `PING_BASE_URL`, and the `DB` binding from validated inputs.
 
-**Tests:** synthetic deployment variables override the intended config values, missing/invalid production values stop deployment, generated config stays out of Git, and Wrangler dry-run resolves the generated config without contacting a production D1.
+**Tests:** synthetic deployment variables override the intended config values, missing/invalid production values stop deployment, generated config stays out of Git, and Wrangler dry-run resolves the generated config without contacting a production D1. `corepack pnpm test` and `corepack pnpm typecheck` pass; the deployment dry-run bundles successfully with synthetic hostnames and D1 identifiers. Production D1, Access, DNS/certificates, edge rate limiting, and a live Worker deployment remain operator setup.
 
 ## Restic JSON handling for examples
 

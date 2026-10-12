@@ -31,11 +31,11 @@ Read the [client protocol v1](docs/client-protocol.md), [dashboard read API](doc
 
 Register Discord webhooks or Telegram Bot API destinations in Settings, then select any number of them for each Job. A Job with no selected destinations sends no notifications. Target credentials are stored in D1 and are never returned by the list APIs; leaving credential fields blank while editing keeps the existing values. Disable a target to stop new alert deliveries and pause queued sends. Unassign a target from all Jobs before deleting it.
 
-For deployment, protect the dashboard hostname with Cloudflare Access and set `ADMIN_HOST` to that hostname. Set `PING_BASE_URL` to a separate public hostname such as `https://ingest.example.com`; the generated URL must not point at the Access-protected dashboard host. The public ping routes authenticate with each Job's capability URL. See [Cloudflare Access and hostname setup](docs/cloudflare-access.md).
+For deployment through a connected GitHub repository, set the validated `DEPLOY_*` build variables and use the generated Wrangler config. Protect the dashboard hostname with Cloudflare Access and keep the client ping hostname public. See the [Cloudflare Workers Builds deployment guide](docs/cloudflare-workers-deploy.md) and [Cloudflare Access and hostname setup](docs/cloudflare-access.md).
 
 The design uses one five-minute Worker Cron Trigger for all Jobs and starts with Workers Free + D1. Review the current [Workers and D1 Free quotas](docs/cloudflare-access.md#free-plan-fit) against your expected run volume before deployment.
 
-Do not deploy the placeholder D1 database ID from `wrangler.jsonc`. Create a new Cloudflare D1 database for production, set its ID, apply the baseline schema to that remote database, and review the [Cloudflare deployment checklist](docs/cloudflare-access.md#production-checklist). No production Worker or database is deployed by the local tests.
+Do not deploy the placeholder D1 database ID from `wrangler.jsonc`. Create a new Cloudflare D1 database for production, set its name and ID in Workers Builds, then apply the baseline schema to that remote database as described in the [deployment guide](docs/cloudflare-workers-deploy.md). No production Worker or database is deployed by the local tests.
 
 ## Checks
 
