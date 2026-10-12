@@ -1,41 +1,34 @@
 # Restic Monitor 작업 지침
 
-## 범위와 기준 문서
+## 제품 범위
 
-- 현재 승인된 작업 단계만 구현한다. 단계 경계나 범위를 넓혀야 하면 변경 이유와 영향부터 설명하고 승인을 기다린다.
-- 프로토콜과 구현 순서는 [`docs/implementation-plan.md`](docs/implementation-plan.md)를 기준으로 한다. 구현을 시작하기 전 해당 문서의 결정을 다시 확인한다.
-- 1~7단계는 구현과 로컬 검증을 완료했다. 8단계의 저장소 내 Docker 통합 shim과 예제 설정은 구현·로컬 검증할 수 있다. 실제 Host 설정 적용, 실제 Repository 실행, Cloudflare 운영 endpoint 전송은 대상과 안전한 검증 범위가 정해진 별도 승인 전에는 하지 않는다.
+- 핵심 제품은 서버 설정 UI, ping API, D1 기록, 일정 감지, 알림이다.
+- Restic Reporter 구현은 제품 필수 범위가 아니다. Bash와 PowerShell은 계약을 보여주는 작은 예제로만 제공한다.
+- 새 ping API는 `/api/v1/` 아래에서 계속 v1로 제공한다. 아직 사용 중인 배포가 없으므로 이전 프로토콜 호환성은 유지하지 않아도 된다.
+- 개발 D1은 필요하면 초기화할 수 있다. 기존 배포 데이터 보존용 schema migration/backfill은 요구하지 않는다. 빈 D1을 만드는 초기 schema는 유지한다.
+- 기존 `docker-restic` 저장소에는 접근하거나 변경하지 않는다. 관련 예제와 테스트는 현재 `restic-monitor` 저장소 안에서만 관리한다.
 
-## 백업 환경 보존
+## Client와 API 계약
 
-- 기존 Docker, cron, Restic 명령과 저장소 설정을 가능한 한 그대로 둔다. Reporter는 기존 스크립트에서 선택적으로 감쌀 수 있어야 한다.
-- Reporter가 Restic의 인자, stdout, stderr, 종료 코드를 보존한다. 모니터링 서버나 전송 큐 장애가 실제 백업 결과를 바꾸지 않도록 한다.
-- Restic 프로세스의 종료 코드를 파이프라인이나 `set -e` 동작 때문에 잃지 않는다. JSON stdout, stderr, 종료 코드를 각각 보존한다.
-- 공유 저장소의 전체 크기를 개별 Host 또는 Job의 기여량으로 간주하지 않는다.
+- Job, operation, repository, schedule, notification 설정은 서버 UI에 저장한다. 클라이언트가 매번 이 설정을 payload에 반복하지 않는다.
+- 클라이언트는 Job ping URL과 한 실행당 `run_id` 하나를 사용한다. 시작/완료 구분은 endpoint 경로로 한다. `event_id`, `workflow_id`, `event_type`, `job_key`, `repository_key`, `schema_version`, 클라이언트 timestamp/duration은 ping body에 요구하지 않는다.
+- 완료 요청은 Restic exit code를 필수로 받고, Restic 버전/허용된 summary metrics/error summary는 선택 필드로 받는다.
+- 동일 run의 재시도는 같은 URL과 같은 body를 재사용한다. 시작은 run ID로 멱등 처리하고, 같은 완료 body는 중복 수락하며 다른 완료 body는 충돌로 거부한다.
+- ping URL의 token은 권한을 가진 비밀이다. 원문을 DB나 로그에 저장하지 않고, UI에서 생성 또는 회전 시 한 번만 보여준다.
+- 원시 stdout/stderr, 경로, 저장소 URL, 비밀번호와 credential은 전송하거나 저장하지 않는다. 오류 요약은 제한·정리한다.
+- D1은 prepared statements, 제약 조건, 필요한 인덱스를 사용한다.
 
-## API 및 데이터
+## Job과 감시
 
-- Bash와 향후 Go Reporter는 같은 버전 명시형 JSON 프로토콜과 같은 적합성 fixture를 사용한다. 클라이언트 구현 언어에 종속된 필드나 동작을 프로토콜에 넣지 않는다.
-- 모든 이벤트는 재전송해도 안전해야 한다. `event_id`와 payload 해시를 검증하고, 이벤트 기록과 실행 상태 갱신을 원자적으로 처리한다.
-- 클라이언트가 보낸 성공 상태를 신뢰하지 않는다. 허용된 작업별 Restic 종료 코드와 서버 감지 결과를 이용해 상태를 판정한다.
-- D1 쿼리는 prepared statement와 바인딩 매개변수를 사용한다. 사용자 입력을 SQL 문자열에 연결하지 않는다.
-- D1 스키마 변경은 순방향 마이그레이션으로 관리하고, FK, 유일성, 상태 CHECK 제약과 조회 인덱스를 명시한다.
-- stdout 전체, stderr 전체, 파일 경로, 자격 증명, Restic 저장소 URL을 원격으로 보내거나 장기 보관하지 않는다. 오류 요약은 길이를 제한하고 민감한 값을 마스킹한다.
-- API 토큰, Discord Webhook 및 기타 비밀은 저장소에 커밋하지 않는다. API 토큰 원문은 재조회 가능한 형태로 저장하지 않는다.
+- Job은 독립된 명령, 일정, 결과 및 알림 단위다. backup과 prune처럼 독립 실행되는 작업은 별도 Job으로 구성한다.
+- 같은 작업의 여러 cron 규칙은 한 Job에 연결할 수 있다. 일정 종류 모델은 확장 가능하게 두되 초기 구현은 표준 5-field cron과 IANA timezone만 평가한다.
+- 시작 지연 유예와 최대 실행 시간은 별도 설정한다.
+- Worker Cron은 Restic을 실행하지 않는다. 예정 실행 누락, 실행 timeout, Discord outbox 재시도를 처리한다.
+- 기존 exit code 상태 매핑과 Repository stats 이상 감지를 유지한다. backend 물리 사용량을 Restic 통계로 추정하지 않는다.
 
-## 실패 처리와 감시
+## 검증과 변경
 
-- 재시도 가능한 응답과 영구 오류를 구분한다. 재시도에서는 최초 이벤트 ID와 payload를 그대로 사용한다.
-- spool 이벤트는 임시 파일에 완전히 쓴 뒤 원자적으로 이름을 바꾼다. 서버가 이벤트를 수락했다는 응답을 받은 뒤에만 큐에서 제거한다.
-- 알림 전송은 영속 outbox 상태를 통해 재시도하고 중복 알림을 억제한다. 요청 처리의 비동기 후속 실행만으로 전달 보장을 주장하지 않는다.
-- Worker Cron은 백업 작업 자체의 스케줄러가 아니다. 작업의 timezone, 유예 시간, 타임아웃, 중복 경보 방지와 외부 감시 heartbeat를 별도로 다룬다.
-
-## 검증
-
-- 각 구현 단계는 [`docs/implementation-plan.md`](docs/implementation-plan.md)의 완료 조건을 만족해야 한다.
-- 단계마다 해당 동작을 검증하는 테스트를 작성하고 실행한다. 실패·중복·부분 실패·순서 역전·네트워크 장애를 정상 흐름만큼 중요하게 다룬다.
-- Restic JSON fixture는 지원 대상 버전과 명령별로 관리한다. 예제 fixture와 실제로 확인한 버전을 구분한다.
-- 로컬 D1/Wrangler 테스트와 실제 Cloudflare 배포 검증을 구분해 결과를 기록한다. 비밀이나 운영 저장소에 접근하는 검증은 승인된 환경에서만 한다.
-- 단계 완료 보고에는 변경 파일, 실행한 검증과 결과, 알려진 제한을 기록한다.
-- 사용자가 `docker-restic` 저장소를 건드리지 말라고 지시했다. 그 저장소의 파일, Git 상태와 설정에 접근하거나 변경하지 않고, 필요한 통합 파일은 현재 `restic-monitor` 저장소 안에서만 만든다.
-- 7단계에서는 Repository stats mode를 명시하고 `restore-size`와 `raw-data`를 서로 다른 Job별 시계열로 저장한다. 이상 증가는 최소 표본을 채운 뒤의 기준에만 적용하며, backend 물리 용량을 Restic 통계에서 추정하지 않는다.
+- 각 구현 단계는 `docs/implementation-plan.md`의 완료 조건을 만족해야 한다.
+- 각 단계마다 mock 입력과 격리된 D1을 사용하는 테스트를 작성하고 실행한다. 실제 백업 저장소, 운영 endpoint, Docker host를 테스트에 요구하지 않는다.
+- 단계 경계마다 Git commit을 만든다. 테스트 실패와 알려진 제한은 단계 완료 보고에 기록한다.
+- 공식 Restic JSON/exit code 또는 Cloudflare runtime 동작을 구현에 반영하기 전 공식 문서를 확인한다.
