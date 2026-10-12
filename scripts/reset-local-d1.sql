@@ -1,0 +1,19 @@
+-- Local-only destructive reset. Run only through `pnpm db:reset:local` (always --local).
+DROP TABLE IF EXISTS notification_deliveries;
+DROP TABLE IF EXISTS alerts;
+DROP TABLE IF EXISTS schedule_occurrences;
+DROP TABLE IF EXISTS job_schedule_state;
+DROP TABLE IF EXISTS job_schedule_rules;
+DROP TABLE IF EXISTS run_metrics;
+DROP TABLE IF EXISTS run_repositories;
+DROP TABLE IF EXISTS repository_stats;
+DROP TABLE IF EXISTS runs;
+DROP TABLE IF EXISTS job_ping_tokens;
+DROP TABLE IF EXISTS job_tags;
+DROP TABLE IF EXISTS job_repositories;
+DROP TABLE IF EXISTS ingest_events;
+DROP TABLE IF EXISTS api_tokens;
+DROP TABLE IF EXISTS jobs;
+DROP TABLE IF EXISTS repositories;
+DROP TABLE IF EXISTS hosts;
+DROP TABLE IF EXISTS d1_migrations;

@@ -1,5 +1,9 @@
 const state = {
   repositories: [],
+  adminHosts: [],
+  adminRepositories: [],
+  adminJobs: [],
+  editingJobId: null,
   runCursor: null,
   selectedRepository: null,
   selectedRuns: [],
@@ -40,9 +44,14 @@ const labels = {
   backend_physical_bytes: "백엔드 실제 사용량 (미수집)",
 };
 
-async function api(path) {
+async function api(path, options = {}) {
   const response = await fetch(path, {
-    headers: { Accept: "application/json" },
+    ...options,
+    headers: {
+      Accept: "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...options.headers,
+    },
     credentials: "same-origin",
   });
   if (!response.ok) {
@@ -78,8 +87,8 @@ function formatBytes(value) {
   return `${new Intl.NumberFormat("ko-KR", { maximumFractionDigits: index === 0 ? 0 : 1 }).format(rounded)} ${units[index]}`;
 }
 
-function formatDuration(value) {
-  if (value === null || value === undefined) return "진행 중";
+function formatDuration(value, isRunning = true) {
+  if (value === null || value === undefined) return isRunning ? "진행 중" : "측정 불가";
   const totalSeconds = Math.max(0, Math.floor(Number(value) / 1000));
   if (totalSeconds < 60) return `${totalSeconds}초`;
   const minutes = Math.floor(totalSeconds / 60);
@@ -96,6 +105,168 @@ function setError(error) {
 function clearError() {
   elements.error.hidden = true;
   elements.error.textContent = "";
+}
+
+function showAdminMessage(message, isError = false) {
+  const target = document.querySelector("#admin-message");
+  target.hidden = false;
+  target.classList.toggle("error", isError);
+  target.textContent = message;
+}
+
+async function loadManagement() {
+  const [hosts, repositories, jobs] = await Promise.all([
+    api("/api/v1/admin/hosts"),
+    api("/api/v1/admin/repositories"),
+    api("/api/v1/admin/jobs"),
+  ]);
+  state.adminHosts = hosts.data;
+  state.adminRepositories = repositories.data;
+  state.adminJobs = jobs.data;
+  renderAdminHostOptions();
+  renderJobRepositoryFields();
+  renderAdminJobs();
+}
+
+function renderAdminHostOptions(selected = document.querySelector("#job-host").value) {
+  const select = document.querySelector("#job-host");
+  select.replaceChildren(new Option("호스트 선택", ""));
+  for (const host of state.adminHosts) {
+    if (host.enabled) select.add(new Option(host.display_name, host.id));
+  }
+  if ([...select.options].some((option) => option.value === selected)) select.value = selected;
+}
+
+function renderJobRepositoryFields(selection = []) {
+  const target = document.querySelector("#job-repository-fields");
+  const operation = document.querySelector("#job-operation").value;
+  const roles = operation === "copy" ? ["source", "target"] : ["repository"];
+  target.replaceChildren();
+  for (const role of roles) {
+    const label = node("label", "", operation === "copy" ? `${role === "source" ? "원본" : "대상"} 저장소` : "저장소");
+    const select = document.createElement("select");
+    select.required = true;
+    select.dataset.role = role;
+    select.append(new Option("저장소 선택", ""));
+    for (const repository of state.adminRepositories) {
+      if (repository.enabled) select.add(new Option(`${repository.name} (${repository.repository_key})`, repository.id));
+    }
+    const chosen = selection.find((item) => item.role === role)?.repository_id;
+    if (chosen) select.value = chosen;
+    label.append(select);
+    target.append(label);
+  }
+}
+
+function renderAdminJobs() {
+  const list = document.querySelector("#admin-jobs-list");
+  list.replaceChildren();
+  if (state.adminJobs.length === 0) {
+    list.append(node("p", "empty-state", "등록된 작업이 없습니다."));
+    return;
+  }
+  for (const job of state.adminJobs) {
+    const row = node("article", "admin-job-row");
+    const info = node("div", "admin-job-info");
+    info.append(node("span", "admin-job-name", `${job.name} · ${job.host_name}`));
+    const schedule = job.schedules.map((item) => `${item.expression} (${item.timezone}, grace ${item.start_grace_seconds}s)`).join(" · ");
+    const repos = job.repositories.map((item) => item.repository_key).join(", ");
+    info.append(node("span", "admin-job-sub", `${job.slug} · ${job.operation} · ${repos} · ${schedule} · ${job.enabled ? "활성" : "비활성"}`));
+    const actions = node("div", "admin-job-actions");
+    const edit = node("button", "button button-quiet", "수정");
+    edit.type = "button";
+    edit.addEventListener("click", () => editJob(job));
+    const rotate = node("button", "button button-quiet", "Ping URL 교체");
+    rotate.type = "button";
+    rotate.addEventListener("click", () => rotateJobToken(job));
+    actions.append(edit, rotate);
+    row.append(info, actions);
+    list.append(row);
+  }
+}
+
+function editJob(job) {
+  const form = document.querySelector("#job-form");
+  state.editingJobId = job.id;
+  document.querySelector("#job-form-title").textContent = `작업 수정 · ${job.name}`;
+  document.querySelector("#cancel-job-edit").hidden = false;
+  form.elements.namedItem("host_id").value = job.host_id;
+  form.elements.namedItem("host_id").disabled = true;
+  form.elements.namedItem("name").value = job.name;
+  form.elements.namedItem("slug").value = job.slug;
+  form.elements.namedItem("operation").value = job.operation;
+  form.elements.namedItem("max_runtime_seconds").value = job.max_runtime_seconds;
+  form.elements.namedItem("tags").value = job.tags.join(", ");
+  form.elements.namedItem("description").value = job.description;
+  form.elements.namedItem("schedules").value = job.schedules.map((item) =>
+    `${item.expression}|${item.timezone}|${item.start_grace_seconds}`,
+  ).join("\n");
+  form.elements.namedItem("discord_enabled").checked = job.discord_enabled;
+  form.elements.namedItem("enabled").checked = job.enabled;
+  renderJobRepositoryFields(job.repositories);
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function resetJobForm() {
+  const form = document.querySelector("#job-form");
+  state.editingJobId = null;
+  form.reset();
+  form.elements.namedItem("host_id").disabled = false;
+  document.querySelector("#job-form-title").textContent = "작업 등록";
+  document.querySelector("#cancel-job-edit").hidden = true;
+  form.elements.namedItem("max_runtime_seconds").value = "14400";
+  form.elements.namedItem("schedules").value = "0 3 * * *|Asia/Seoul|600";
+  renderAdminHostOptions("");
+  renderJobRepositoryFields();
+}
+
+function parseScheduleLines(text) {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!lines.length || lines.length > 16) throw new Error("Cron 규칙은 1개 이상, 16개 이하로 입력하세요.");
+  return lines.map((line) => {
+    const [expression, timezone, grace, ...extra] = line.split("|").map((part) => part.trim());
+    if (!expression || !timezone || grace === undefined || extra.length > 0 || !/^\d+$/.test(grace)) {
+      throw new Error(`잘못된 Cron 규칙입니다: ${line}`);
+    }
+    return { schedule_type: "cron", expression, timezone, start_grace_seconds: Number(grace) };
+  });
+}
+
+function jobFormPayload(form) {
+  const value = (name) => form.elements.namedItem(name).value.trim();
+  const payload = {
+    host_id: value("host_id"),
+    name: value("name"),
+    slug: value("slug") || undefined,
+    description: value("description"),
+    operation: value("operation"),
+    max_runtime_seconds: Number(value("max_runtime_seconds")),
+    tags: value("tags").split(",").map((tag) => tag.trim()).filter(Boolean),
+    discord_enabled: form.elements.namedItem("discord_enabled").checked,
+    enabled: form.elements.namedItem("enabled").checked,
+    repositories: [...form.querySelectorAll("select[data-role]")].map((select) => ({
+      repository_id: select.value,
+      role: select.dataset.role,
+    })),
+    schedules: parseScheduleLines(value("schedules")),
+  };
+  return payload;
+}
+
+function showPingUrl(url) {
+  document.querySelector("#ping-url-value").textContent = url;
+  document.querySelector("#ping-url-dialog").showModal();
+}
+
+async function rotateJobToken(job) {
+  if (!window.confirm(`${job.name}에 연결된 기존 Ping URL을 폐기하고 새 URL을 만들까요?`)) return;
+  try {
+    const result = await api(`/api/v1/admin/jobs/${encodeURIComponent(job.id)}/rotate-ping-token`, { method: "POST" });
+    showPingUrl(result.ping_url);
+    showAdminMessage(`${job.name}의 Ping URL을 교체했습니다. 이전 URL은 더 이상 사용할 수 없습니다.`);
+  } catch (error) {
+    showAdminMessage(error.message, true);
+  }
 }
 
 function queryString(values) {
@@ -231,7 +402,11 @@ async function loadRuns(reset) {
 function renderRuns(runs, replace) {
   if (replace) elements.runsBody.replaceChildren();
   if (runs.length === 0 && replace) {
-    elements.runsBody.append(node("tr", "", node("td", "empty-cell", "조건에 맞는 실행이 없습니다.")));
+    const emptyRow = node("tr");
+    const emptyCell = node("td", "empty-cell", "조건에 맞는 실행이 없습니다.");
+    emptyCell.colSpan = 6;
+    emptyRow.append(emptyCell);
+    elements.runsBody.append(emptyRow);
     return;
   }
   const offset = replace ? 0 : elements.runsBody.querySelectorAll("tr[data-run-id]").length;
@@ -241,8 +416,8 @@ function renderRuns(runs, replace) {
     row.dataset.runId = run.id;
 
     const dateCell = node("td");
-    dateCell.append(node("span", "date-main", formatDate(run.started_at)));
-    dateCell.append(node("span", "date-sub", formatDuration(run.duration_ms)));
+    dateCell.append(node("span", "date-main", run.start_ping_received ? formatDate(run.started_at) : "시작 핑 없음"));
+    dateCell.append(node("span", "date-sub", formatDuration(run.duration_ms, run.status === "running")));
 
     const jobCell = node("td");
     jobCell.append(node("span", "cell-title", run.job.name));
@@ -284,9 +459,9 @@ function renderRunDetail(run) {
   const details = [
     ["상태", labels[run.status] || run.status],
     ["호스트", run.host.display_name],
-    ["시작", formatDate(run.started_at)],
+    ["시작", run.start_ping_received ? formatDate(run.started_at) : "시작 핑 없음"],
     ["종료", formatDate(run.finished_at)],
-    ["소요 시간", formatDuration(run.duration_ms)],
+    ["소요 시간", formatDuration(run.duration_ms, run.status === "running")],
     ["종료 코드", run.exit_code ?? "—"],
     ["Restic 버전", run.client.restic_version || "기록되지 않음"],
     ["Run ID", run.id],
@@ -427,6 +602,81 @@ function renderChart(rows) {
 
 document.querySelector("#refresh-button").addEventListener("click", () => loadDashboard());
 document.querySelector("#close-dialog").addEventListener("click", () => elements.runDialog.close());
+document.querySelector("#close-ping-dialog").addEventListener("click", () => document.querySelector("#ping-url-dialog").close());
+document.querySelector("#ping-url-dialog").addEventListener("close", () => {
+  document.querySelector("#ping-url-value").textContent = "";
+});
+document.querySelector("#copy-ping-url").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(document.querySelector("#ping-url-value").textContent);
+    showAdminMessage("Ping URL을 클립보드에 복사했습니다.");
+  } catch {
+    showAdminMessage("브라우저에서 복사를 허용하지 않습니다. 표시된 URL을 직접 복사하세요.", true);
+  }
+});
+document.querySelector("#reload-admin").addEventListener("click", () => loadManagement().catch((error) => showAdminMessage(error.message, true)));
+document.querySelector("#job-operation").addEventListener("change", () => renderJobRepositoryFields());
+document.querySelector("#cancel-job-edit").addEventListener("click", resetJobForm);
+
+document.querySelector("#host-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  try {
+    await api("/api/v1/admin/hosts", {
+      method: "POST",
+      body: JSON.stringify({ name: data.get("name"), display_name: data.get("display_name") }),
+    });
+    form.reset();
+    await loadManagement();
+    showAdminMessage("호스트를 등록했습니다.");
+  } catch (error) {
+    showAdminMessage(error.message, true);
+  }
+});
+
+document.querySelector("#repository-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  try {
+    await api("/api/v1/admin/repositories", {
+      method: "POST",
+      body: JSON.stringify({
+        repository_key: data.get("repository_key"),
+        name: data.get("name"),
+        backend_type: data.get("backend_type"),
+      }),
+    });
+    form.reset();
+    await loadManagement();
+    await loadDashboard();
+    showAdminMessage("저장소를 등록했습니다.");
+  } catch (error) {
+    showAdminMessage(error.message, true);
+  }
+});
+
+document.querySelector("#job-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  try {
+    const payload = jobFormPayload(form);
+    const editing = state.editingJobId !== null;
+    const result = await api(
+      editing ? `/api/v1/admin/jobs/${encodeURIComponent(state.editingJobId)}` : "/api/v1/admin/jobs",
+      { method: editing ? "PUT" : "POST", body: JSON.stringify(payload) },
+    );
+    resetJobForm();
+    await loadManagement();
+    await loadDashboard();
+    if (result.ping_url) showPingUrl(result.ping_url);
+    showAdminMessage(editing ? "작업 설정을 저장했습니다." : "작업을 등록했습니다. 생성된 Ping URL을 백업 호스트에 안전하게 저장하세요.");
+  } catch (error) {
+    showAdminMessage(error.message, true);
+  }
+});
+
 elements.loadMore.addEventListener("click", async () => {
   elements.loadMore.disabled = true;
   try {
@@ -443,3 +693,4 @@ for (const select of [elements.hostFilter, elements.repositoryFilter, elements.s
 elements.measurementFilter.addEventListener("change", () => loadStats().catch(setError));
 
 loadDashboard();
+loadManagement().catch((error) => showAdminMessage(error.message, true));

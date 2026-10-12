@@ -1,24 +1,47 @@
-# Dashboard 접근 보호
+# Cloudflare Access and hostname setup
 
-Dashboard 사용자 인증은 Worker 코드가 아니라 Cloudflare Access edge policy가 담당한다. `/api/v1/read/*`는 `ADMIN_HOST`와 요청 URL의 hostname이 정확히 일치해야 동작하지만, 이 검사는 Access 로그인 인증을 대신하지 않는다.
+The web UI and admin API are for operators. Protect their hostname with Cloudflare Access. Restic clients cannot complete an Access login, so send pings to a separate public hostname and authenticate them with the per-Job ping URL.
 
-## 권장 hostname 분리
+## Hostnames
 
-운영에서는 같은 Worker에 서로 다른 두 hostname을 연결한다.
+Use two custom domains on the same Worker:
 
-- Dashboard: `monitor.example.com`
-- Reporter ingest: `ingest.example.com`
+| Purpose | Example | Access policy |
+|---|---|---|
+| Dashboard and admin API | `monitor.example.com` | Require an operator identity |
+| Client ping API | `ingest.example.com` | Publicly reachable; each Job URL is a secret capability |
 
-Wrangler/Cloudflare dashboard에서 두 custom domain을 Worker에 연결하고, Worker의 `ADMIN_HOST` 변수를 `monitor.example.com`으로 설정한다. 변수에는 scheme, port, path를 넣지 않는다. 기본 `localhost` 값은 로컬 개발용이며, 배포 전에 운영 hostname으로 바꿔야 한다. 값이 비어 있거나 hostname과 다르면 read API는 404를 돌려준다.
+Set the Worker variables:
 
-Cloudflare One에서 `monitor.example.com`을 보호하는 Self-hosted Access application을 만들고 조직의 사용자 또는 허용 이메일을 대상으로 Allow policy를 설정한다. Application hostname 전체를 보호하면 정적 dashboard 파일과 read API가 함께 Access 정책을 통과한다. Dashboard hostname에는 공개 Bypass policy를 추가하지 않는다.
+- `ADMIN_HOST=monitor.example.com`
+- `PING_BASE_URL=https://ingest.example.com`
 
-Reporters에는 `https://ingest.example.com`을 `RESTIC_MONITOR_API_URL`로 지정한다. 이 hostname은 Access login으로 막지 않고 `POST /api/v1/ingest/events`의 Host 범위 Bearer token 인증을 사용한다. `ingest.example.com` 및 `workers.dev` hostname에서 `/api/v1/read/*`를 요청하면 `ADMIN_HOST` 검사에서 404가 반환된다.
+`PING_BASE_URL` must be an origin only: no path, credentials, query, or fragment. The Worker refuses to create or rotate a Job ping URL if this value is missing on a non-local hostname or if it points at the Access-protected admin hostname. Local development uses the request origin when `PING_BASE_URL` is not set.
 
-`workers.dev` URL을 유지해도 읽기 API hostname 검사는 적용된다. 운영에서 ingest를 custom domain으로 이전한 뒤 `workers.dev`를 사용하지 않는다면 Worker 설정에서 해당 route를 끌 수 있다. Dashboard URL을 브라우저에서 열어 Access login을 직접 확인하고, 로그인하지 않은 세션에서는 HTML/JS/CSS와 read API 모두 차단되는지 점검한다.
+In Cloudflare One, create a Self-hosted Access application for `monitor.example.com` and allow the operator accounts or email addresses that need the dashboard. Protect the whole hostname, including static assets and `/api/v1/admin/*` and `/api/v1/read/*`. Do not add a public Bypass rule to this hostname.
 
-## 로컬 개발
+Do not put an Access login gate in front of `ingest.example.com`. The ping token is a high-entropy capability: anyone who obtains a Job URL can report runs for that Job until the token is rotated. Store it in the host's secret configuration, avoid shell history and process listings where possible, and do not print the full URL in routine logs. The Worker stores only the token hash and a short prefix.
 
-`wrangler dev`는 `ADMIN_HOST=localhost`로 실행되며 Cloudflare Access를 시뮬레이션하지 않는다. 로컬 API smoke test를 위해 외부에 개발 서버를 노출하지 않는다. Access policy와 identity provider는 Cloudflare 계정 설정이므로 자동화된 로컬 D1 테스트 범위에 포함되지 않는다.
+The API does not currently enforce request rate limits in the Worker. Before exposing the ping hostname, configure Cloudflare edge rate limiting appropriate to the expected cron frequency and review the account's Workers and D1 quotas. A rate limit must allow normal retries and simultaneous Jobs.
 
-참고 문서: Cloudflare [Access applications](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/), [Self-hosted applications](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/choose-application-type/), [Access application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/), [Workers static asset routing](https://developers.cloudflare.com/workers/static-assets/routing/worker-script/).
+## Free plan fit
+
+This is a low-volume, Free-first design, not a guarantee that every backup fleet fits Free quotas. Current Workers Free limits include 100,000 requests per day, 10 ms CPU per HTTP request and Cron invocation, and five Cron Triggers per account. D1 Free includes five million rows read per day, 100,000 rows written per day, and 5 GB of total storage. The Worker uses one five-minute Cron Trigger for all Jobs, so per-Job schedules do not consume separate Cloudflare triggers. Watch CPU and D1 row metrics after deployment; if they approach limits, reduce catch-up work or move to Workers Paid. See official [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) and [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/).
+
+## Production checklist
+
+1. Create a new Cloudflare D1 database and replace the placeholder `database_id` in `wrangler.jsonc` for the production configuration.
+2. Apply the clean baseline schema to the remote database with `wrangler d1 migrations apply restic-monitor --remote` after checking the configured database name and ID.
+3. Set `ADMIN_HOST` and `PING_BASE_URL` as Worker variables. Attach both custom domains to the Worker.
+4. Protect `monitor.example.com` with Access; leave `ingest.example.com` reachable to clients and configure edge rate limiting there.
+5. Add `DISCORD_WEBHOOK_URL` with `wrangler secret put DISCORD_WEBHOOK_URL` if Discord delivery is wanted.
+6. Create one Host, Repository, and Job per independently scheduled Restic command in the UI. Save each one-time ping URL securely on its client.
+7. Verify a synthetic start/completion request against the deployed Worker, then confirm the run and alert in the dashboard. Do not test against a production Restic repository during initial setup.
+
+Never run `db:reset:local` for a remote database. That command is deliberately hard-coded to local Wrangler D1.
+
+## Local development
+
+`wrangler dev` uses `ADMIN_HOST=localhost` and does not simulate Cloudflare Access. Its dashboard and admin routes are only a local-development convenience. Local tests use isolated databases. The local reset command acts only on this repository's `.wrangler` D1 state.
+
+Official Cloudflare references: [Access applications](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/), [Self-hosted applications](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/choose-application-type/), [Access application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/), [Workers static asset routing](https://developers.cloudflare.com/workers/static-assets/routing/worker-script/), and [D1 migrations](https://developers.cloudflare.com/d1/reference/migrations/).

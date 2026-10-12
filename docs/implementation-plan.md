@@ -1,10 +1,23 @@
 # Restic Monitor implementation plan
 
-- Status: redesign approved; implementation in progress
+- Status: stages 1–6 implemented and locally verified; production deployment remains separate
 - API path version: v1 (no release or deployed client requires a protocol migration)
 - Database baseline: resettable development database; no existing-data backfill or compatibility migration is required
 - Scope: server-side Job configuration, ping API, schedule monitoring, Discord alerts, dashboard, and small Bash/PowerShell examples
 - Out of scope: a required Reporter product, modifying an existing Docker/cron host, or editing the sibling `docker-restic` repository
+
+## Current implementation status
+
+| Stage | Status | Verification |
+|---|---|---|
+| 1. v1 protocol and clean D1 baseline | Complete | JSON Schema and isolated D1 constraints; this project's local D1 was reset and the single baseline applied |
+| 2. Host/Repository/Job API | Complete | Create, edit, disable, validation, immutable Host association, unique slug, and one-time token tests |
+| 3. Start/completion ping API | Complete | Idempotency, conflicting retries, body validation, exit-code mapping, missing-start behavior, token revocation, and synthetic metrics |
+| 4. Schedule and alerts | Complete | Multiple cron rules, grace boundaries, catch-up, DST, timeout, recovery, Discord preference, and outbox retry tests |
+| 5. Management/status UI | Complete | Static JavaScript check plus local browser smoke for Host/Repository/Job create, one-time URL display, and Job edit |
+| 6. Client examples and scope cleanup | Complete | Bash example with fake Restic/curl and synthetic fixtures; PowerShell runtime is unavailable in this Linux environment |
+
+`corepack pnpm test` and `corepack pnpm typecheck` pass: 13 protocol tests, 28 Worker/D1 tests, the synthetic Bash client test, and static JavaScript validation. The local dashboard browser smoke covered Host/Repository/Job creation, one-time URL display, and Job edit. Cloudflare Access policy, production D1, deployed hostname routing, and edge rate limiting are operator configuration and have not been deployed or verified here. Timeout and missed-schedule detection run on the Worker Cron every five minutes, so alert detection can lag the configured boundary by up to one Cron interval.
 
 ## Product model
 
@@ -25,7 +38,7 @@ POST /api/v1/ping/{ping_token}/runs/{run_id}/complete
 
 Completion requires `application/json` and an `exit_code` from 0 to 255. Optional fields are `restic_version`, a small set of allow-listed Restic summary metrics, Repository stats for `stats` Jobs, and a short sanitized `error_summary`. The API gets operation, host, and repository associations from Job configuration. Raw stdout/stderr, paths, repository URLs, and credentials are never accepted as stored output.
 
-The Worker timestamps requests when received and calculates run duration. Repeating start with the same Job/run ID returns the original run without resetting its start time. Repeating completion with the same semantic JSON result returns the accepted result; a different result for a completed run is `409 Conflict`. Start and completion updates are atomic with metrics and alert state. A completion received before its start ping is still recorded with a zero/unknown duration marker; a later start cannot move a completed run back to running.
+The Worker timestamps requests when received and calculates run duration. Repeating start with the same Job/run ID returns the original run without resetting its start time. Repeating completion with the same semantic JSON result returns the accepted result; a different result for a completed run is `409 Conflict`. Start and completion updates are atomic with metrics and alert state. A completion received before its start ping is still recorded with `start_ping_received=false` and a null duration; a later start cannot move a completed run back to running.
 
 The client reports the Restic exit code. The server maps it using the configured operation: zero is success; the documented partial-success code is applied only to operations where Restic defines it; cancellation and all other non-zero codes are failures. Metrics are optional and do not affect run status. Delivery retries reuse the same run URL and body. The examples show bounded curl/PowerShell retries; a durable local spool is optional client behavior, not a server protocol requirement.
 
@@ -63,7 +76,7 @@ Replace the event envelope schema with the v1 start/completion route contract, O
 
 ### Stage 2 — Admin configuration API
 
-Add Access-host-protected CRUD for Hosts, Repositories, Jobs, tags, repository associations, cron rules, Discord preference, and ping-token rotation. Generate a ping URL only on Job creation/token rotation. Validate cron/timezone/operation/server references before saving.
+Add Access-host-protected Host/Repository listing and registration plus Job create/update/disable, tags, repository associations, cron rules, Discord preference, and ping-token rotation. Generate a ping URL only on Job creation/token rotation. Validate cron/timezone/operation/server references before saving. Job Host is immutable after creation so existing run history cannot be reassigned.
 
 **Tests:** create/update/disable Job, duplicate slug, invalid association, schedule and timezone errors, one-time token return/hash-only storage/rotation, and rejection from a non-admin hostname.
 
@@ -77,25 +90,25 @@ Implement POST-only start/completion endpoints. Resolve the ping token to one en
 
 Adapt missed-start and runtime-timeout processing to multiple cron rules. Apply each rule's timezone and start grace, retain catch-up/DST behavior, and only queue Discord notifications for Jobs that enable Discord. Keep the existing repository growth anomaly rule.
 
-**Tests:** grace boundaries, two cron rules on one Job, same-time occurrence dedupe, DST transitions, Worker catch-up, missing start, timeout, late completion recovery, disabled Discord delivery, webhook retry and recovery notices.
+**Tests:** grace boundaries, two cron rules on one Job, same-time occurrence dedupe, DST transitions, Worker catch-up, missing start, timeout, late completion recovery, Repository growth alert/recovery, disabled Discord delivery, webhook retry and recovery notices.
 
 ### Stage 5 — Management and status UI
 
-Add Host/Repository/Job registration and editing, schedule/tag/association/notification controls, one-time ping URL display and rotation, and Job status/history views. Keep the run and repository measurements dashboard.
+Add Host/Repository registration and Job registration/editing, schedule/tag/association/notification controls, one-time ping URL display and rotation, and Job status/history views. Keep the run and repository measurements dashboard.
 
-**Tests:** static JavaScript checks plus UI/API flows for create, edit, invalid form values, hidden/one-time secret display, and post-creation ping examples using synthetic data.
+**Tests:** Admin API flows for create/edit/disable and token rotation; static JavaScript syntax; local browser smoke for Host/Repository/Job create, one-time URL display, Job edit, and empty dashboard state.
 
 ### Stage 6 — Client examples and scope cleanup
 
-Provide Bash/curl and PowerShell examples that run an existing Restic command, keep its exit code, optionally parse summary data, and send start/completion pings. Do not require a wrapper CLI, Docker image, spool, or quarantine. Classify current Reporter/shim/e2e work as optional legacy examples or remove it from default product checks after the new examples pass.
+Provide Bash/curl and PowerShell examples that run an existing Restic command, keep its exit code, optionally parse summary data, and send start/completion pings. Do not require a wrapper CLI, Docker image, spool, or quarantine. The previous Reporter spool, Docker shim integration, and live-restic end-to-end test have been removed from this project.
 
-**Tests:** parser fixtures for Restic 0.19.1 backup JSON Lines and stats JSON, exit codes 0/3/130/unknown, malformed/partial output, HTTP retries, and stable run ID/body. These tests use fake Restic output and never initialize or access a real repository.
+**Tests:** Bash parser fixtures for Restic 0.19.1 backup JSON Lines and stats JSON, exit codes 0/3/130/unknown, malformed/partial output, HTTP retries, and stable run ID/body. These tests use fake Restic and curl executables and never initialize or access a real repository. PowerShell has not been run because this environment has no PowerShell runtime.
 
 ## Restic JSON handling for examples
 
 The API stores only a small, stable subset parsed on the client. Restic `backup --json` emits newline-delimited JSON; the last successful `summary` contains `data_added`, `data_added_packed`, `total_bytes_processed`, file counts, and an optional `snapshot_id`. `stats --json` emits one JSON object, whose `total_size` depends on the selected mode. The client must send an explicit `mode` with Repository stats. `prune` does not currently support JSON, and `forget --prune` can mix JSON and text, so the examples report its exit code without trying to parse detailed prune output.
 
-Restic exit errors can appear as a JSON `exit_error` on stderr, but runtime/argument failures may not follow that format. Use the process exit code as the required result and treat error text as optional, sanitized context. Numeric values above JavaScript's safe integer range are omitted instead of rounded. Restic documents that new output fields/message types may be added; parsers ignore unknown fields. See the [Restic scripting and JSON documentation](https://restic.readthedocs.io/en/stable/075_scripting.html).
+Restic may emit structured fatal-error JSON on stderr, while runtime/argument failures may use different output. Use the process exit code as the required result and omit raw error text by default. Numeric values above JavaScript's safe integer range are omitted instead of rounded. Restic documents that new output fields/message types may be added; parsers ignore unknown fields. See the [Restic scripting and JSON documentation](https://restic.readthedocs.io/en/stable/075_scripting.html).
 
 ## Deployment boundary
 

@@ -167,9 +167,77 @@
             </div>
           </section>
         </div>
+
+        <details class="admin-section panel">
+          <summary class="panel-heading">
+            <div>
+              <p class="eyebrow">설정</p>
+              <h2>호스트 · 저장소 · 작업 관리</h2>
+            </div>
+            <span class="panel-meta">이 페이지는 Cloudflare Access로 보호하세요</span>
+          </summary>
+          <div class="admin-content">
+            <p id="admin-message" class="admin-message" role="status" hidden></p>
+            <div class="admin-forms">
+              <form id="host-form" class="admin-form">
+                <h3>호스트 등록</h3>
+                <label>호스트 ID <input name="name" required maxlength="128" placeholder="nas-home"></label>
+                <label>표시 이름 <input name="display_name" required maxlength="128" placeholder="집 NAS"></label>
+                <button class="button button-outline" type="submit">호스트 추가</button>
+              </form>
+              <form id="repository-form" class="admin-form">
+                <h3>저장소 등록</h3>
+                <label>저장소 키 <input name="repository_key" required maxlength="128" pattern="[A-Za-z0-9._\-]+" placeholder="home-backup"></label>
+                <label>표시 이름 <input name="name" required maxlength="128" placeholder="Home Backup"></label>
+                <label>백엔드
+                  <select name="backend_type">
+                    <option value="local">로컬</option><option value="sftp">SFTP</option>
+                    <option value="rest">REST</option><option value="s3">S3</option>
+                    <option value="b2">Backblaze B2</option><option value="azure">Azure</option>
+                    <option value="gs">Google Cloud Storage</option><option value="other">기타</option>
+                  </select>
+                </label>
+                <button class="button button-outline" type="submit">저장소 추가</button>
+              </form>
+            </div>
+
+            <form id="job-form" class="admin-form job-form">
+              <div class="form-heading">
+                <div><h3 id="job-form-title">작업 등록</h3><p>백업과 prune처럼 별도 실행되는 명령은 작업도 따로 등록합니다.</p></div>
+                <button id="cancel-job-edit" class="button button-quiet" type="button" hidden>수정 취소</button>
+              </div>
+              <div class="admin-fields">
+                <label>호스트 <select name="host_id" id="job-host" required></select><small>실행 이력을 보호하기 위해 작업 생성 후 호스트는 바꿀 수 없습니다.</small></label>
+                <label>작업 이름 <input name="name" required maxlength="128" placeholder="매일 문서 백업"></label>
+                <label>Slug (선택) <input name="slug" maxlength="100" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" placeholder="daily-documents"></label>
+                <label>작업 종류
+                  <select name="operation" id="job-operation">
+                    <option value="backup">backup</option><option value="forget">forget</option>
+                    <option value="prune">prune</option><option value="forget_prune">forget_prune</option>
+                    <option value="copy">copy</option><option value="stats">stats</option>
+                    <option value="check">check</option><option value="restore">restore</option>
+                  </select>
+                </label>
+                <div id="job-repository-fields" class="repository-fields"></div>
+                <label>최대 실행 시간 (초) <input name="max_runtime_seconds" type="number" min="1" max="31536000" value="14400" required></label>
+                <label>Tag (쉼표로 구분) <input name="tags" maxlength="2048" placeholder="home, production"></label>
+                <label class="wide-field">설명 <textarea name="description" maxlength="2000" rows="2"></textarea></label>
+                <label class="wide-field">Cron 규칙 <textarea name="schedules" required rows="3">0 3 * * *|Asia/Seoul|600</textarea><small>한 줄에 하나씩: <code>cron 표현식|시간대|시작 유예 초</code></small></label>
+                <label class="check-field"><input name="discord_enabled" type="checkbox" checked> Discord 알림 사용</label>
+                <label class="check-field"><input name="enabled" type="checkbox" checked> 작업 활성화</label>
+              </div>
+              <button class="button button-primary" type="submit">작업 저장</button>
+            </form>
+
+            <section class="admin-job-list" aria-labelledby="admin-jobs-title">
+              <div class="form-heading"><h3 id="admin-jobs-title">등록된 작업</h3><button id="reload-admin" class="button button-quiet" type="button">새로고침</button></div>
+              <div id="admin-jobs-list" class="stack-list"><p class="empty-state">작업을 불러오는 중입니다.</p></div>
+            </section>
+          </div>
+        </details>
       </main>
 
-      <footer class="footer-note">Restic Monitor · 데이터는 등록된 실행 이벤트와 측정값을 기준으로 표시됩니다.</footer>
+      <footer class="footer-note">Restic Monitor · 수신된 실행 ping과 Restic 측정값을 표시합니다.</footer>
     </div>
 
     <dialog id="run-dialog" class="run-dialog" aria-labelledby="dialog-title">
@@ -181,6 +249,18 @@
         <button id="close-dialog" class="button button-quiet" type="button" aria-label="닫기">닫기</button>
       </div>
       <div id="run-detail" class="detail-content"></div>
+    </dialog>
+
+    <dialog id="ping-url-dialog" class="run-dialog" aria-labelledby="ping-dialog-title">
+      <div class="dialog-heading">
+        <div><p class="eyebrow">한 번만 표시</p><h2 id="ping-dialog-title">작업 Ping URL</h2></div>
+        <button id="close-ping-dialog" class="button button-quiet" type="button">닫기</button>
+      </div>
+      <div class="ping-url-content">
+        <p>이 URL에는 작업의 비밀 token이 포함됩니다. 백업 호스트의 비밀 설정에 저장하세요.</p>
+        <code id="ping-url-value" class="ping-url-value"></code>
+        <button id="copy-ping-url" class="button button-primary" type="button">URL 복사</button>
+      </div>
     </dialog>
 
     <script type="module" src="/app.js"></script>
