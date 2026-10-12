@@ -22,7 +22,107 @@ async function put(path: string, value: unknown) {
   });
 }
 
+async function remove(path: string) {
+  return exports.default.fetch(`${adminBase}${path}`, { method: "DELETE" });
+}
+
 describe("admin configuration API", () => {
+  it("updates Host and Repository details, keeps stable keys, and protects referenced records from deletion", async () => {
+    const now = Date.now();
+    const localHostId = crypto.randomUUID();
+    const unusedHostId = crypto.randomUUID();
+    const localRepoId = crypto.randomUUID();
+    const unusedRepoId = crypto.randomUUID();
+    await env.DB.prepare(
+      "INSERT INTO hosts (id, name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(localHostId, `host-${localHostId.slice(0, 8)}`, "Original host", now, now).run();
+    await env.DB.prepare(
+      "INSERT INTO hosts (id, name, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(unusedHostId, `host-${unusedHostId.slice(0, 8)}`, "Unused host", now, now).run();
+    await env.DB.prepare(
+      `INSERT INTO repositories (id, repository_key, name, backend_type, created_at, updated_at)
+       VALUES (?, ?, ?, 'local', ?, ?), (?, ?, ?, 's3', ?, ?)`,
+    ).bind(
+      localRepoId, `repo-${localRepoId.slice(0, 8)}`, "Original repo", now, now,
+      unusedRepoId, `repo-${unusedRepoId.slice(0, 8)}`, "Unused repo", now, now,
+    ).run();
+
+    const updatedHost = await put(`/hosts/${localHostId}`, { display_name: "Renamed host", enabled: false });
+    expect(updatedHost.status).toBe(200);
+    expect(await env.DB.prepare("SELECT name, display_name, enabled FROM hosts WHERE id = ?")
+      .bind(localHostId).first()).toEqual({
+      name: `host-${localHostId.slice(0, 8)}`,
+      display_name: "Renamed host",
+      enabled: 0,
+    });
+    expect((await put(`/hosts/${localHostId}`, { display_name: "", enabled: false })).status).toBe(422);
+    expect((await remove(`/hosts/${unusedHostId}`)).status).toBe(204);
+
+    const updatedRepository = await put(`/repositories/${localRepoId}`, {
+      name: "Renamed repo",
+      backend_type: "s3",
+      enabled: false,
+    });
+    expect(updatedRepository.status).toBe(200);
+    expect(await env.DB.prepare("SELECT repository_key, name, backend_type, enabled FROM repositories WHERE id = ?")
+      .bind(localRepoId).first()).toEqual({
+      repository_key: `repo-${localRepoId.slice(0, 8)}`,
+      name: "Renamed repo",
+      backend_type: "s3",
+      enabled: 0,
+    });
+    expect((await remove(`/repositories/${unusedRepoId}`)).status).toBe(204);
+
+    const job = await post("/jobs", {
+      host_id: localHostId,
+      name: "Linked backup",
+      operation: "backup",
+      max_runtime_seconds: 600,
+      repositories: [{ repository_id: localRepoId, role: "repository" }],
+      schedules: [{ schedule_type: "cron", expression: "0 3 * * *", timezone: "UTC", start_grace_seconds: 0 }],
+    });
+    expect(job.status).toBe(422);
+    const reenableHost = await put(`/hosts/${localHostId}`, { display_name: "Renamed host", enabled: true });
+    const reenableRepo = await put(`/repositories/${localRepoId}`, {
+      name: "Renamed repo",
+      backend_type: "s3",
+      enabled: true,
+    });
+    expect(reenableHost.status).toBe(200);
+    expect(reenableRepo.status).toBe(200);
+
+    const jobInput = {
+      host_id: localHostId,
+      name: "Linked backup",
+      operation: "backup",
+      max_runtime_seconds: 600,
+      repositories: [{ repository_id: localRepoId, role: "repository" }],
+      schedules: [{ schedule_type: "cron", expression: "0 3 * * *", timezone: "UTC", start_grace_seconds: 0 }],
+    };
+    const createdJob = await post("/jobs", jobInput);
+    expect(createdJob.status).toBe(201);
+    const { id: jobId } = await createdJob.json() as { id: string };
+    expect((await put(`/hosts/${localHostId}`, { display_name: "Renamed host", enabled: false })).status).toBe(200);
+    expect((await put(`/repositories/${localRepoId}`, {
+      name: "Renamed repo",
+      backend_type: "s3",
+      enabled: false,
+    })).status).toBe(200);
+    const editedWithHiddenReferences = await put(`/jobs/${jobId}`, { ...jobInput, name: "Still linked" });
+    expect(editedWithHiddenReferences.status).toBe(200);
+    const blockedHostDelete = await remove(`/hosts/${localHostId}`);
+    expect(blockedHostDelete.status).toBe(409);
+    await expect(blockedHostDelete.json()).resolves.toMatchObject({ error: "host_in_use", jobs_count: 1 });
+    const blockedRepositoryDelete = await remove(`/repositories/${localRepoId}`);
+    expect(blockedRepositoryDelete.status).toBe(409);
+    await expect(blockedRepositoryDelete.json()).resolves.toMatchObject({
+      error: "repository_in_use",
+      jobs_count: 1,
+      runs_count: 0,
+      stats_count: 0,
+    });
+  });
+
   it("creates inventory and a server-configured Job with a one-time ping URL", async () => {
     const now = Date.now();
     await env.DB.prepare(

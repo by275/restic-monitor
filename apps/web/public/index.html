@@ -180,16 +180,22 @@
             <p id="admin-message" class="admin-message" role="status" hidden></p>
             <div class="admin-forms">
               <form id="host-form" class="admin-form">
-                <h3>호스트 등록</h3>
-                <label>호스트 ID <input name="name" required maxlength="128" placeholder="nas-home"></label>
+                <div class="form-heading">
+                  <h3 id="host-form-title">호스트 등록</h3>
+                  <button id="cancel-host-edit" class="button button-quiet" type="button" hidden>취소</button>
+                </div>
+                <label>호스트 ID <input name="name" required maxlength="128" placeholder="nas-home"><small>등록 후에는 변경할 수 없습니다.</small></label>
                 <label>표시 이름 <input name="display_name" required maxlength="128" placeholder="집 NAS"></label>
-                <button class="button button-outline" type="submit">호스트 추가</button>
+                <button id="host-submit" class="button button-outline" type="submit">호스트 추가</button>
               </form>
               <form id="repository-form" class="admin-form">
-                <h3>저장소 등록</h3>
-                <label>저장소 키 <input name="repository_key" required maxlength="128" pattern="[A-Za-z0-9._\-]+" placeholder="home-backup"></label>
+                <div class="form-heading">
+                  <h3 id="repository-form-title">저장소 등록</h3>
+                  <button id="cancel-repository-edit" class="button button-quiet" type="button" hidden>취소</button>
+                </div>
+                <label>저장소 키 <input name="repository_key" required maxlength="128" pattern="[A-Za-z0-9._\-]+" placeholder="home-backup"><small>등록 후에는 변경할 수 없습니다.</small></label>
                 <label>표시 이름 <input name="name" required maxlength="128" placeholder="Home Backup"></label>
-                <label>백엔드
+                <label>백엔드 종류
                   <select name="backend_type">
                     <option value="local">로컬</option><option value="sftp">SFTP</option>
                     <option value="rest">REST</option><option value="s3">S3</option>
@@ -197,8 +203,19 @@
                     <option value="gs">Google Cloud Storage</option><option value="other">기타</option>
                   </select>
                 </label>
-                <button class="button button-outline" type="submit">저장소 추가</button>
+                <button id="repository-submit" class="button button-outline" type="submit">저장소 추가</button>
               </form>
+            </div>
+
+            <div class="admin-resource-lists">
+              <section class="admin-resource-list" aria-labelledby="host-management-title">
+                <div class="form-heading"><h3 id="host-management-title">등록된 호스트</h3><span class="panel-meta">작업이 연결된 항목은 비활성화할 수 있습니다.</span></div>
+                <div id="host-management-list" class="stack-list"><p class="empty-state">호스트를 불러오는 중입니다.</p></div>
+              </section>
+              <section class="admin-resource-list" aria-labelledby="repository-management-title">
+                <div class="form-heading"><h3 id="repository-management-title">등록된 저장소</h3><span class="panel-meta">작업이나 기록이 연결된 항목은 비활성화할 수 있습니다.</span></div>
+                <div id="repository-management-list" class="stack-list"><p class="empty-state">저장소를 불러오는 중입니다.</p></div>
+              </section>
             </div>
 
             <form id="job-form" class="admin-form job-form">

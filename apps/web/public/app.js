@@ -3,6 +3,8 @@ const state = {
   adminHosts: [],
   adminRepositories: [],
   adminJobs: [],
+  editingHostId: null,
+  editingRepositoryId: null,
   editingJobId: null,
   runCursor: null,
   selectedRepository: null,
@@ -123,16 +125,209 @@ async function loadManagement() {
   state.adminHosts = hosts.data;
   state.adminRepositories = repositories.data;
   state.adminJobs = jobs.data;
-  renderAdminHostOptions();
-  renderJobRepositoryFields();
+  const editingJob = state.adminJobs.find((job) => job.id === state.editingJobId);
+  renderAdminHostOptions(editingJob?.host_id ?? document.querySelector("#job-host").value);
+  renderJobRepositoryFields(editingJob?.repositories ?? []);
+  renderManagedInventory();
   renderAdminJobs();
+}
+
+function renderManagedInventory() {
+  renderManagedHosts();
+  renderManagedRepositories();
+}
+
+function addResourceAction(actions, label, className, handler, disabled = false, title = "") {
+  const button = node("button", className, label);
+  button.type = "button";
+  button.disabled = disabled;
+  if (title) button.title = title;
+  button.addEventListener("click", handler);
+  actions.append(button);
+}
+
+function renderManagedHosts() {
+  const list = document.querySelector("#host-management-list");
+  list.replaceChildren();
+  if (state.adminHosts.length === 0) {
+    list.append(node("p", "empty-state", "등록된 호스트가 없습니다."));
+    return;
+  }
+  for (const host of state.adminHosts) {
+    const jobsCount = Number(host.jobs_count) || 0;
+    const row = node("article", "admin-resource-row");
+    const info = node("div", "admin-resource-info");
+    info.append(node("span", "admin-resource-name", host.display_name));
+    info.append(node("span", "admin-resource-sub", `${host.name} · ${jobsCount}개 작업 · ${host.enabled ? "선택 가능" : "새 작업에서 숨김"}`));
+    const actions = node("div", "admin-job-actions");
+    addResourceAction(actions, "수정", "button button-quiet", () => editHost(host));
+    addResourceAction(
+      actions,
+      host.enabled ? "선택에서 숨김" : "다시 선택 허용",
+      "button button-quiet",
+      () => setHostEnabled(host, !host.enabled),
+    );
+    addResourceAction(
+      actions,
+      "삭제",
+      "button button-quiet button-danger-quiet",
+      () => deleteHost(host),
+      jobsCount > 0,
+      jobsCount > 0 ? "작업이 연결되어 있어 삭제할 수 없습니다. 연결 작업과 이력을 유지하려면 선택에서 숨기세요." : "",
+    );
+    row.append(info, actions);
+    list.append(row);
+  }
+}
+
+function renderManagedRepositories() {
+  const list = document.querySelector("#repository-management-list");
+  list.replaceChildren();
+  if (state.adminRepositories.length === 0) {
+    list.append(node("p", "empty-state", "등록된 저장소가 없습니다."));
+    return;
+  }
+  for (const repository of state.adminRepositories) {
+    const jobsCount = Number(repository.jobs_count) || 0;
+    const runsCount = Number(repository.runs_count) || 0;
+    const statsCount = Number(repository.stats_count) || 0;
+    const inUse = jobsCount + runsCount + statsCount > 0;
+    const row = node("article", "admin-resource-row");
+    const info = node("div", "admin-resource-info");
+    info.append(node("span", "admin-resource-name", repository.name));
+    info.append(node("span", "admin-resource-sub", `${repository.repository_key} · ${jobsCount}개 작업 · ${repository.enabled ? "선택 가능" : "새 작업에서 숨김"}`));
+    const actions = node("div", "admin-job-actions");
+    addResourceAction(actions, "수정", "button button-quiet", () => editRepository(repository));
+    addResourceAction(
+      actions,
+      repository.enabled ? "선택에서 숨김" : "다시 선택 허용",
+      "button button-quiet",
+      () => setRepositoryEnabled(repository, !repository.enabled),
+    );
+    addResourceAction(
+      actions,
+      "삭제",
+      "button button-quiet button-danger-quiet",
+      () => deleteRepository(repository),
+      inUse,
+      inUse ? `연결된 사용 기록이 있습니다 (${jobsCount}개 작업, ${runsCount}개 실행, ${statsCount}개 측정값).` : "",
+    );
+    row.append(info, actions);
+    list.append(row);
+  }
+}
+
+function editHost(host) {
+  resetRepositoryForm();
+  const form = document.querySelector("#host-form");
+  state.editingHostId = host.id;
+  form.elements.namedItem("name").value = host.name;
+  form.elements.namedItem("name").disabled = true;
+  form.elements.namedItem("display_name").value = host.display_name;
+  document.querySelector("#host-form-title").textContent = `호스트 수정 · ${host.display_name}`;
+  document.querySelector("#host-submit").textContent = "호스트 저장";
+  document.querySelector("#cancel-host-edit").hidden = false;
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function resetHostForm() {
+  const form = document.querySelector("#host-form");
+  state.editingHostId = null;
+  form.reset();
+  form.elements.namedItem("name").disabled = false;
+  document.querySelector("#host-form-title").textContent = "호스트 등록";
+  document.querySelector("#host-submit").textContent = "호스트 추가";
+  document.querySelector("#cancel-host-edit").hidden = true;
+}
+
+function editRepository(repository) {
+  resetHostForm();
+  const form = document.querySelector("#repository-form");
+  state.editingRepositoryId = repository.id;
+  form.elements.namedItem("repository_key").value = repository.repository_key;
+  form.elements.namedItem("repository_key").disabled = true;
+  form.elements.namedItem("name").value = repository.name;
+  form.elements.namedItem("backend_type").value = repository.backend_type;
+  document.querySelector("#repository-form-title").textContent = `저장소 수정 · ${repository.name}`;
+  document.querySelector("#repository-submit").textContent = "저장소 저장";
+  document.querySelector("#cancel-repository-edit").hidden = false;
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function resetRepositoryForm() {
+  const form = document.querySelector("#repository-form");
+  state.editingRepositoryId = null;
+  form.reset();
+  form.elements.namedItem("repository_key").disabled = false;
+  document.querySelector("#repository-form-title").textContent = "저장소 등록";
+  document.querySelector("#repository-submit").textContent = "저장소 추가";
+  document.querySelector("#cancel-repository-edit").hidden = true;
+}
+
+async function setHostEnabled(host, enabled) {
+  const action = enabled ? "다시 선택할 수 있게" : "새 작업에서 숨기게";
+  if (!confirm(`호스트 '${host.display_name}'를 ${action} 설정할까요? 기존 작업과 이력은 유지됩니다.`)) return;
+  try {
+    await api(`/api/v1/admin/hosts/${encodeURIComponent(host.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ display_name: host.display_name, enabled }),
+    });
+    await loadManagement();
+    await loadDashboard();
+    showAdminMessage(enabled ? "호스트를 다시 선택할 수 있습니다." : "호스트를 새 작업 선택에서 숨겼습니다.");
+  } catch (error) {
+    showAdminMessage(error.message, true);
+  }
+}
+
+async function setRepositoryEnabled(repository, enabled) {
+  const action = enabled ? "다시 선택할 수 있게" : "새 작업에서 숨기게";
+  if (!confirm(`저장소 '${repository.name}'를 ${action} 설정할까요? 기존 작업과 이력은 유지됩니다.`)) return;
+  try {
+    await api(`/api/v1/admin/repositories/${encodeURIComponent(repository.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ name: repository.name, backend_type: repository.backend_type, enabled }),
+    });
+    await loadManagement();
+    await loadDashboard();
+    showAdminMessage(enabled ? "저장소를 다시 선택할 수 있습니다." : "저장소를 새 작업 선택에서 숨겼습니다.");
+  } catch (error) {
+    showAdminMessage(error.message, true);
+  }
+}
+
+async function deleteHost(host) {
+  if (!confirm(`호스트 '${host.display_name}'를 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
+  try {
+    await api(`/api/v1/admin/hosts/${encodeURIComponent(host.id)}`, { method: "DELETE" });
+    await loadManagement();
+    await loadDashboard();
+    showAdminMessage("호스트를 삭제했습니다.");
+  } catch (error) {
+    showAdminMessage(error.message, true);
+  }
+}
+
+async function deleteRepository(repository) {
+  if (!confirm(`저장소 '${repository.name}'를 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
+  try {
+    await api(`/api/v1/admin/repositories/${encodeURIComponent(repository.id)}`, { method: "DELETE" });
+    await loadManagement();
+    await loadDashboard();
+    showAdminMessage("저장소를 삭제했습니다.");
+  } catch (error) {
+    showAdminMessage(error.message, true);
+  }
 }
 
 function renderAdminHostOptions(selected = document.querySelector("#job-host").value) {
   const select = document.querySelector("#job-host");
   select.replaceChildren(new Option("호스트 선택", ""));
   for (const host of state.adminHosts) {
-    if (host.enabled) select.add(new Option(host.display_name, host.id));
+    if (host.enabled || host.id === selected) {
+      const option = new Option(`${host.display_name}${host.enabled ? "" : " (숨김)"}`, host.id);
+      select.add(option);
+    }
   }
   if ([...select.options].some((option) => option.value === selected)) select.value = selected;
 }
@@ -148,10 +343,15 @@ function renderJobRepositoryFields(selection = []) {
     select.required = true;
     select.dataset.role = role;
     select.append(new Option("저장소 선택", ""));
-    for (const repository of state.adminRepositories) {
-      if (repository.enabled) select.add(new Option(`${repository.name} (${repository.repository_key})`, repository.id));
-    }
     const chosen = selection.find((item) => item.role === role)?.repository_id;
+    for (const repository of state.adminRepositories) {
+      if (repository.enabled || repository.id === chosen) {
+        select.add(new Option(
+          `${repository.name} (${repository.repository_key})${repository.enabled ? "" : " · 숨김"}`,
+          repository.id,
+        ));
+      }
+    }
     if (chosen) select.value = chosen;
     label.append(select);
     target.append(label);
@@ -190,6 +390,7 @@ function editJob(job) {
   state.editingJobId = job.id;
   document.querySelector("#job-form-title").textContent = `작업 수정 · ${job.name}`;
   document.querySelector("#cancel-job-edit").hidden = false;
+  renderAdminHostOptions(job.host_id);
   form.elements.namedItem("host_id").value = job.host_id;
   form.elements.namedItem("host_id").disabled = true;
   form.elements.namedItem("name").value = job.name;
@@ -629,6 +830,8 @@ document.querySelector("#copy-ping-url").addEventListener("click", async () => {
 document.querySelector("#reload-admin").addEventListener("click", () => loadManagement().catch((error) => showAdminMessage(error.message, true)));
 document.querySelector("#job-operation").addEventListener("change", () => renderJobRepositoryFields());
 document.querySelector("#cancel-job-edit").addEventListener("click", resetJobForm);
+document.querySelector("#cancel-host-edit").addEventListener("click", resetHostForm);
+document.querySelector("#cancel-repository-edit").addEventListener("click", resetRepositoryForm);
 document.querySelector('[name="discord_webhook_url"]').addEventListener("input", (event) => {
   if (event.currentTarget.value.trim()) document.querySelector('[name="clear_discord_webhook"]').checked = false;
 });
@@ -641,13 +844,17 @@ document.querySelector("#host-form").addEventListener("submit", async (event) =>
   const form = event.currentTarget;
   const data = new FormData(form);
   try {
-    await api("/api/v1/admin/hosts", {
-      method: "POST",
-      body: JSON.stringify({ name: data.get("name"), display_name: data.get("display_name") }),
+    const editing = state.editingHostId !== null;
+    const host = state.adminHosts.find((item) => item.id === state.editingHostId);
+    await api(editing ? `/api/v1/admin/hosts/${encodeURIComponent(state.editingHostId)}` : "/api/v1/admin/hosts", {
+      method: editing ? "PUT" : "POST",
+      body: JSON.stringify(editing
+        ? { display_name: data.get("display_name"), enabled: host ? Boolean(host.enabled) : true }
+        : { name: data.get("name"), display_name: data.get("display_name") }),
     });
-    form.reset();
+    resetHostForm();
     await loadManagement();
-    showAdminMessage("호스트를 등록했습니다.");
+    showAdminMessage(editing ? "호스트 정보를 수정했습니다." : "호스트를 등록했습니다.");
   } catch (error) {
     showAdminMessage(error.message, true);
   }
@@ -658,18 +865,28 @@ document.querySelector("#repository-form").addEventListener("submit", async (eve
   const form = event.currentTarget;
   const data = new FormData(form);
   try {
-    await api("/api/v1/admin/repositories", {
-      method: "POST",
-      body: JSON.stringify({
-        repository_key: data.get("repository_key"),
-        name: data.get("name"),
-        backend_type: data.get("backend_type"),
-      }),
+    const editing = state.editingRepositoryId !== null;
+    const repository = state.adminRepositories.find((item) => item.id === state.editingRepositoryId);
+    await api(editing
+      ? `/api/v1/admin/repositories/${encodeURIComponent(state.editingRepositoryId)}`
+      : "/api/v1/admin/repositories", {
+      method: editing ? "PUT" : "POST",
+      body: JSON.stringify(editing
+        ? {
+          name: data.get("name"),
+          backend_type: data.get("backend_type"),
+          enabled: repository ? Boolean(repository.enabled) : true,
+        }
+        : {
+          repository_key: data.get("repository_key"),
+          name: data.get("name"),
+          backend_type: data.get("backend_type"),
+        }),
     });
-    form.reset();
+    resetRepositoryForm();
     await loadManagement();
     await loadDashboard();
-    showAdminMessage("저장소를 등록했습니다.");
+    showAdminMessage(editing ? "저장소 정보를 수정했습니다." : "저장소를 등록했습니다.");
   } catch (error) {
     showAdminMessage(error.message, true);
   }

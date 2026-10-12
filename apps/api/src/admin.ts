@@ -80,13 +80,54 @@ api.post("/hosts", async (context) => {
   }
 });
 
+api.put("/hosts/:hostId", async (context) => {
+  const hostId = context.req.param("hostId");
+  if (!UUID_PATTERN.test(hostId)) return context.json({ error: "invalid_host_id" }, 400);
+  const parsed = await readJson(context.req.raw);
+  if (!parsed.ok) return context.json({ error: parsed.error }, parsed.status);
+  const value = asRecord(parsed.value);
+  if (!value || !validLabel(value.display_name, 128) || typeof value.enabled !== "boolean") {
+    return context.json({ error: "invalid_host_update" }, 422);
+  }
+  try {
+    const result = await context.env.DB.prepare(
+      "UPDATE hosts SET display_name = ?, enabled = ?, updated_at = ? WHERE id = ?",
+    ).bind(value.display_name.trim(), value.enabled ? 1 : 0, Date.now(), hostId).run();
+    if (result.meta.changes !== 1) return context.json({ error: "host_not_found" }, 404);
+    return context.json({ id: hostId, display_name: value.display_name.trim(), enabled: value.enabled });
+  } catch {
+    return context.json({ error: "temporarily_unavailable" }, 503);
+  }
+});
+
+api.delete("/hosts/:hostId", async (context) => {
+  const hostId = context.req.param("hostId");
+  if (!UUID_PATTERN.test(hostId)) return context.json({ error: "invalid_host_id" }, 400);
+  try {
+    const host = await context.env.DB.prepare("SELECT id FROM hosts WHERE id = ?")
+      .bind(hostId).first<{ id: string }>();
+    if (host === null) return context.json({ error: "host_not_found" }, 404);
+    const usage = await context.env.DB.prepare("SELECT COUNT(*) AS count FROM jobs WHERE host_id = ?")
+      .bind(hostId).first<{ count: number }>();
+    if ((usage?.count ?? 0) > 0) {
+      return context.json({ error: "host_in_use", jobs_count: usage?.count ?? 0 }, 409);
+    }
+    await context.env.DB.prepare("DELETE FROM hosts WHERE id = ?").bind(hostId).run();
+    return context.body(null, 204);
+  } catch {
+    return context.json({ error: "temporarily_unavailable" }, 503);
+  }
+});
+
 api.get("/repositories", async (context) => {
   try {
     const result = await context.env.DB.prepare(
       `SELECT r.id, r.repository_key, r.name, r.backend_type, r.enabled, r.created_at, r.updated_at,
-              COUNT(DISTINCT jr.job_id) AS jobs_count
-       FROM repositories AS r LEFT JOIN job_repositories AS jr ON jr.repository_id = r.id
-       GROUP BY r.id ORDER BY r.name COLLATE NOCASE, r.id`,
+              (SELECT COUNT(DISTINCT jr.job_id) FROM job_repositories AS jr WHERE jr.repository_id = r.id) AS jobs_count,
+              (SELECT COUNT(*) FROM run_repositories AS rr WHERE rr.repository_id = r.id) AS runs_count,
+              (SELECT COUNT(*) FROM repository_stats AS rs WHERE rs.repository_id = r.id) AS stats_count
+       FROM repositories AS r
+       ORDER BY r.name COLLATE NOCASE, r.id`,
     ).all();
     return context.json({ data: result.results });
   } catch {
@@ -120,6 +161,67 @@ api.post("/repositories", async (context) => {
     }, 201);
   } catch {
     return context.json({ error: "repository_key_conflict_or_database_error" }, 409);
+  }
+});
+
+api.put("/repositories/:repositoryId", async (context) => {
+  const repositoryId = context.req.param("repositoryId");
+  if (!UUID_PATTERN.test(repositoryId)) return context.json({ error: "invalid_repository_id" }, 400);
+  const parsed = await readJson(context.req.raw);
+  if (!parsed.ok) return context.json({ error: parsed.error }, parsed.status);
+  const value = asRecord(parsed.value);
+  if (
+    !value || !validLabel(value.name, 128) || typeof value.backend_type !== "string" ||
+    !BACKEND_TYPES.has(value.backend_type) || typeof value.enabled !== "boolean"
+  ) return context.json({ error: "invalid_repository_update" }, 422);
+  try {
+    const result = await context.env.DB.prepare(
+      "UPDATE repositories SET name = ?, backend_type = ?, enabled = ?, updated_at = ? WHERE id = ?",
+    ).bind(value.name.trim(), value.backend_type, value.enabled ? 1 : 0, Date.now(), repositoryId).run();
+    if (result.meta.changes !== 1) return context.json({ error: "repository_not_found" }, 404);
+    return context.json({
+      id: repositoryId,
+      name: value.name.trim(),
+      backend_type: value.backend_type,
+      enabled: value.enabled,
+    });
+  } catch {
+    return context.json({ error: "temporarily_unavailable" }, 503);
+  }
+});
+
+api.delete("/repositories/:repositoryId", async (context) => {
+  const repositoryId = context.req.param("repositoryId");
+  if (!UUID_PATTERN.test(repositoryId)) return context.json({ error: "invalid_repository_id" }, 400);
+  try {
+    const repository = await context.env.DB.prepare("SELECT id FROM repositories WHERE id = ?")
+      .bind(repositoryId).first<{ id: string }>();
+    if (repository === null) return context.json({ error: "repository_not_found" }, 404);
+    const usage = await context.env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM job_repositories WHERE repository_id = ?) AS jobs_count,
+         (SELECT COUNT(*) FROM run_repositories WHERE repository_id = ?) AS runs_count,
+         (SELECT COUNT(*) FROM repository_stats WHERE repository_id = ?) AS stats_count`,
+    ).bind(repositoryId, repositoryId, repositoryId).first<{
+      jobs_count: number;
+      runs_count: number;
+      stats_count: number;
+    }>();
+    const jobsCount = usage?.jobs_count ?? 0;
+    const runsCount = usage?.runs_count ?? 0;
+    const statsCount = usage?.stats_count ?? 0;
+    if (jobsCount + runsCount + statsCount > 0) {
+      return context.json({
+        error: "repository_in_use",
+        jobs_count: jobsCount,
+        runs_count: runsCount,
+        stats_count: statsCount,
+      }, 409);
+    }
+    await context.env.DB.prepare("DELETE FROM repositories WHERE id = ?").bind(repositoryId).run();
+    return context.body(null, 204);
+  } catch {
+    return context.json({ error: "temporarily_unavailable" }, 503);
   }
 });
 
@@ -197,13 +299,13 @@ api.put("/jobs/:jobId", async (context) => {
   const validation = validateJob(parsed.value);
   if (!validation.ok) return context.json({ error: validation.error }, 422);
   const input = validation.value;
-  if (!await validateReferences(context.env.DB, input)) {
-    return context.json({ error: "invalid_host_or_repository_reference" }, 422);
-  }
   const current = await context.env.DB.prepare("SELECT id, host_id FROM jobs WHERE id = ?")
     .bind(jobId).first<{ id: string; host_id: string }>();
   if (current === null) return context.json({ error: "job_not_found" }, 404);
   if (input.host_id !== current.host_id) return context.json({ error: "job_host_is_immutable" }, 409);
+  if (!await validateReferences(context.env.DB, input, jobId)) {
+    return context.json({ error: "invalid_host_or_repository_reference" }, 422);
+  }
 
   const slug = resolveSlug(input.slug, input.name, jobId);
   const now = Date.now();
@@ -402,13 +504,27 @@ function isValidCron(expression: string, timezone: string): boolean {
   }
 }
 
-async function validateReferences(db: D1Database, input: JobInput): Promise<boolean> {
-  const host = await db.prepare("SELECT id FROM hosts WHERE id = ? AND enabled = 1")
-    .bind(input.host_id).first<{ id: string }>();
+async function validateReferences(db: D1Database, input: JobInput, existingJobId?: string): Promise<boolean> {
+  const host = existingJobId === undefined
+    ? await db.prepare("SELECT id FROM hosts WHERE id = ? AND enabled = 1")
+      .bind(input.host_id).first<{ id: string }>()
+    : await db.prepare(
+      `SELECT h.id FROM hosts AS h WHERE h.id = ? AND (
+         h.enabled = 1 OR EXISTS (SELECT 1 FROM jobs AS j WHERE j.id = ? AND j.host_id = h.id)
+       )`,
+    ).bind(input.host_id, existingJobId).first<{ id: string }>();
   if (host === null) return false;
   for (const repository of input.repositories) {
-    const row = await db.prepare("SELECT id FROM repositories WHERE id = ? AND enabled = 1")
-      .bind(repository.repository_id).first<{ id: string }>();
+    const row = existingJobId === undefined
+      ? await db.prepare("SELECT id FROM repositories WHERE id = ? AND enabled = 1")
+        .bind(repository.repository_id).first<{ id: string }>()
+      : await db.prepare(
+        `SELECT r.id FROM repositories AS r WHERE r.id = ? AND (
+           r.enabled = 1 OR EXISTS (
+             SELECT 1 FROM job_repositories AS jr WHERE jr.job_id = ? AND jr.repository_id = r.id
+           )
+         )`,
+      ).bind(repository.repository_id, existingJobId).first<{ id: string }>();
     if (row === null) return false;
   }
   return true;

@@ -8,3 +8,4 @@ coverage/
 .env.*
 !.env.example
 .restic-monitor-e2e.*
+.playwright-mcp/

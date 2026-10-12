@@ -1,6 +1,6 @@
 # Restic Monitor implementation plan
 
-- Status: stages 1–7 implemented and locally verified; production deployment remains separate
+- Status: original stages 1–7 implemented; follow-up Stage 8 (Host/Repository management) implemented and locally verified; Stages 9–11 are next
 - API path version: v1 (no release or deployed client requires a protocol migration)
 - Database baseline: resettable development database; no existing-data backfill or compatibility migration is required
 - Scope: server-side Job configuration, ping API, schedule monitoring, per-Job Discord alerts, dashboard, and small Bash/PowerShell examples
@@ -17,6 +17,10 @@
 | 5. Management/status UI | Complete | Static JavaScript check plus local browser smoke for Host/Repository/Job create, one-time URL display, and Job edit |
 | 6. Client examples and scope cleanup | Complete | Bash example with fake Restic/curl and synthetic fixtures; PowerShell runtime is unavailable in this Linux environment |
 | 7. Per-Job Discord webhook configuration | Complete | Admin API and UI replace/remove each Job URL; outbox routes to the owning Job's URL; D1/API/outbox tests |
+| 8. Host/Repository edit, availability, and deletion controls | Complete | D1/API tests and browser smoke for registration, edit, hide/restore, and unused-resource deletion |
+| 9. Reusable Discord/Telegram notification targets | Planned | Generic target registry, Job assignments, provider adapters, target-specific outbox tests |
+| 10. SFPanel-inspired dashboard and admin UI refresh | Planned | Restic Monitor-specific design and browser smoke; no direct SFPanel source reuse |
+| 11. `DEPLOY_*` Wrangler customization | Planned | Synthetic config generation tests and deployment guide |
 
 `corepack pnpm test` and `corepack pnpm typecheck` pass: 13 protocol tests, 29 Worker/D1 tests, the synthetic Bash client test, and static JavaScript validation. The local dashboard browser smoke covered Host/Repository/Job creation, one-time URL display, Job edit, and per-Job webhook status. Cloudflare Access policy, production D1, deployed hostname routing, and edge rate limiting are operator configuration and have not been deployed or verified here. Timeout and missed-schedule detection run on the Worker Cron every five minutes, so alert detection can lag the configured boundary by up to one Cron interval.
 
@@ -110,6 +114,36 @@ Provide Bash/curl and PowerShell examples that run an existing Restic command, k
 Move webhook configuration from one Worker-wide Secret to an optional URL on each Job. Allow Job creation and editing to set, replace, preserve, or remove the URL. Route outbox deliveries through the webhook configured on the owning Job; keep deliveries pending when that Job has no URL. Do not return webhook URL values from the Job listing API.
 
 **Tests:** accept only Discord webhook URLs, verify create/replace/preserve/remove behavior, keep URL values out of listing responses, retain pending deliveries without a target, and send different Jobs to their own targets.
+
+### Follow-up redesign
+
+The pre-release D1 may be recreated from a clean schema for these changes. Preserve the v1 ping contract and keep Reporter/client configuration independent from notification and dashboard changes. Create a commit at each completed stage boundary.
+
+### Stage 8 — Host and Repository management
+
+Add Host and Repository edit and availability controls to the existing Settings area. Keep host `name` and repository `repository_key` stable after creation; allow display name and Repository backend classification to change. Permit hard deletion only when no Job or history refers to the record. Referenced resources can be hidden from new Job selection while existing Jobs and history remain intact. Keep already-linked hidden resources editable within their existing Job.
+
+**Tests:** update display metadata and availability, reject malformed edits, reject deletion of referenced records with usage counts, delete unused resources, and edit Jobs that still reference hidden resources. Browser smoke covers registration, edit, hide/restore, and unused deletion.
+
+### Stage 9 — Reusable notification targets
+
+Replace `jobs.discord_enabled` and `jobs.discord_webhook_url` with a reusable notification target registry and a Job-to-target association. Each target has a UUID, display name, provider type (`discord` or `telegram`), provider configuration, and availability. Discord uses a webhook URL; Telegram uses a bot token and chat ID. A Job can select zero or more targets; no selection creates no notification deliveries. Keep credentials out of list responses and support explicit replace, preserve, and removal behavior. Use provider adapters for message formatting and delivery while retaining shared retry and delivery status handling. Record recipients for each opened alert so recovery notices go to the same targets. Use target-scoped outbox uniqueness to prevent duplicate sends.
+
+Since there is no production data to preserve, replace the initial schema and verify it against a clean D1 rather than adding backfill compatibility for per-Job Discord URLs.
+
+**Tests:** Discord and Telegram configuration validation, secret-safe responses, create/update/remove/availability behavior, zero-target suppression, multiple Job targets, recipient-stable recovery, outbox deduplication, provider failures/retries, and synthetic sends. Verify Telegram request format against the official Bot API documentation during implementation.
+
+### Stage 10 — SFPanel-inspired interface refresh
+
+Make dashboard status, recent runs, resource management, Job editing, and notification targets easier to scan and operate. Use SFPanel as a visual reference only; do not copy source components. Keep the existing static HTML/JavaScript structure for this refresh unless a concrete need for React appears. Treat a React/Vite port and direct SFPanel code reuse as separate decisions because they change the asset build and licensing scope.
+
+**Tests:** static checks, keyboard and narrow-screen interaction review, and synthetic-data browser smoke for dashboard filters, management actions, forms, and confirmation states.
+
+### Stage 11 — `DEPLOY_*` Wrangler customization
+
+Add a deploy command that reads `DEPLOY_*` build variables, creates an ignored deployment-specific Wrangler config by overriding documented fields, validates required hostnames and D1 identifiers, and deploys with that generated config. Keep local development defaults in the tracked config. Provide Cloudflare Workers Builds build/deploy command setup and identify which values are build variables, Worker runtime variables, or D1 bindings. Do not place webhook or Telegram credentials in build variables.
+
+**Tests:** synthetic deployment variables override the intended config values, missing/invalid production values stop deployment, generated config stays out of Git, and Wrangler dry-run resolves the generated config without contacting a production D1.
 
 ## Restic JSON handling for examples
 

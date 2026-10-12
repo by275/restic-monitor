@@ -144,6 +144,17 @@ tbody tr:hover { background: rgba(86, 148, 220, .045); }
 .admin-section[open] > summary::after { content: "−"; }
 .admin-content { display: grid; gap: 22px; padding: 20px; }
 .admin-forms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.admin-resource-lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.admin-resource-list { min-width: 0; padding: 15px; border: 1px solid rgba(141, 161, 189, .15); border-radius: 12px; background: rgba(7, 14, 25, .2); }
+.admin-resource-list > .form-heading { margin-bottom: 8px; }
+.admin-resource-list h3 { margin: 0; font-size: 13px; }
+.admin-resource-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 11px 2px; border-top: 1px solid rgba(141, 161, 189, .1); }
+.admin-resource-info { min-width: 0; }
+.admin-resource-name { display: block; color: var(--text); font-size: 11px; font-weight: 700; }
+.admin-resource-sub { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.button-danger-quiet { color: #ffc0c7; }
+.button-danger-quiet:hover { color: #fff; background: rgba(255, 120, 133, .12); }
+.button:disabled { opacity: .4; cursor: not-allowed; }
 .admin-form { display: grid; align-content: start; gap: 12px; min-width: 0; padding: 17px; border: 1px solid rgba(141, 161, 189, .15); border-radius: 12px; background: rgba(7, 14, 25, .2); }
 .admin-form h3, .admin-job-list h3 { margin: 0; font-size: 13px; }
 .admin-form label { display: grid; gap: 6px; color: var(--muted); font-size: 10px; }
@@ -202,9 +213,10 @@ tbody tr:hover { background: rgba(86, 148, 220, .045); }
   td { padding: 11px 9px; }
   .repository-list { grid-template-columns: 1fr; }
   .detail-grid { grid-template-columns: 1fr; }
-  .admin-forms, .admin-fields { grid-template-columns: 1fr; }
+  .admin-forms, .admin-resource-lists, .admin-fields { grid-template-columns: 1fr; }
   .wide-field, .repository-fields { grid-column: auto; }
   .repository-fields { grid-template-columns: 1fr; }
   .admin-content { padding: 13px; }
   .admin-job-row { align-items: start; flex-direction: column; }
+  .admin-resource-row { align-items: start; flex-direction: column; }
 }
